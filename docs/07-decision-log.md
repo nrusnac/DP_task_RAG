@@ -18,7 +18,7 @@ Each entry: the decision, the alternatives considered, and why. Numbers come fro
 | 11 | **Exact numpy dense search, no FAISS** | FAISS flat/IVF, HNSW | 5.8k × 1024 vectors: exact search ≈ 1 ms. ANN only adds approximation and a dependency. Swap in above ~10⁶ chunks |
 | 12 | **BM25 via bm25s with a legal token pattern** | rank_bm25, BGE-M3 sparse | Fast, supports a `weight_mask` (scoping) and save/load; the pattern keeps "3,552"/"14.3"/"50.0%" whole |
 | 13 | **RRF (k=60) instead of score blending** | weighted sum of normalised scores | BM25 and cosine scales are incomparable; RRF is tuning-free and rewards agreement |
-| 14 | **Scope = the matter's data room by default** | corpus-wide search | The smoke test answered another matter's HHI (1,882 vs. 3,552) without it; confidentiality |
+| 14 | **Scope = the matter's data room by default** | corpus-wide search | In the unscoped smoke test, 2 of the top-3 evidence strips were other matters' HHI tables (2,666 and ~927); confidentiality |
 | 15 | **Agentic module at the retrieval step (Adaptive-RAG + CRAG)** | agentic generation (self-critique); a ReAct agent with a search tool | Retrieval is where failures originate; all-pass grading punishes misses; bounded explicit graph is auditable, a free-form ReAct loop is not ([04](04-agentic-module.md)) |
 | 16 | **Router = Haiku with a JSON schema** | trained T5 classifier (paper) | No routing labels, no time to train; ~2 s per call |
 | 17 | **CRAG evaluator = reranker thresholds + LLM only when ambiguous** | fine-tuned T5 (paper); LLM grades everything | Reuses a model we already run on the GPU; LLM cost only where the score is uninformative. Thresholds calibrated because sigmoid scores are compressed (median 0.76) |

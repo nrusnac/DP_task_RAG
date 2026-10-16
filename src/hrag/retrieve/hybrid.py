@@ -148,7 +148,11 @@ class HybridRetriever:
         if not cand:
             return []
         with tracing.span("crag.refine", kind="RERANKER", **{"input.value": query, "n_strips": len(cand)}) as sp:
-            scores = models.rerank_scores(query, [f"{c[3].meta['doc_title']}: {c[2]}" for c in cand], batch_size=64)
+            # a strip loses its context just like a chunk does ("| Post-Merger HHI | 3,552 |" alone doesn't say which
+            # market), so it is scored together with its document title and section path
+            scores = models.rerank_scores(
+                query, [f"{c[3].meta['doc_title']} › {c[3].meta.get('section') or ''}:\n{c[2]}" for c in cand],
+                batch_size=64)
             keep = [(float(s), c) for s, c in zip(scores, cand) if s >= threshold]
             if not keep:  # always keep the single best strip of the best hit
                 best = int(np.argmax(scores)); keep = [(float(scores[best]), cand[best])]

@@ -3,7 +3,7 @@
 ## Which RAG step, and why
 The agent controls **retrieval**: *whether* to retrieve, *how much*, *with which query*, and *whether the evidence is good enough*. Generation stays a single, well-constrained call.
 
-1. **Retrieval is the dominant failure point.** If the evidence isn't retrieved, no generator can recover it. If wrong evidence is retrieved, a fluent generator turns it into a confident wrong answer. The smoke test did exactly that: it answered "1,882" from another matter.
+1. **Retrieval is the dominant failure point.** If the evidence isn't retrieved, no generator can recover it. If wrong evidence is retrieved, a fluent generator turns it into a confident wrong answer. The smoke test did exactly that: given truncated evidence, it answered "1,882" (the document's *national* HHI) instead of the regional 3,552, and two of its top-3 evidence strips came from other matters.
 2. **The questions are heterogeneous.** Harvey criteria range from one-fact lookups ("cites post-merger HHI 3,552") to multi-hop synthesis ("explains the remedy strategy across overlapping markets"). Any fixed pipeline is either wasteful on the first kind or insufficient on the second.
 3. **The scoring is all-pass, and legal work is zero-tolerance for invented facts.** Missing one fact fails a Harvey task, and fabricating one is worse than saying "not found". So the system must **notice** bad retrieval, **correct** it, and **abstain** when correction fails.
 4. **Bounded and auditable.** At most 2 corrective rounds per sub-question and at most 2 sufficiency iterations. Every decision is logged in the state (`log`) and traced as a Phoenix span.

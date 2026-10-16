@@ -44,7 +44,7 @@ Each technique fixes a specific way naive RAG (fixed-size chunks → embed → t
 
 ## 5. Metadata scoping
 Every chunk carries `task_id`. A question about a matter searches only that matter's data room (a boolean mask on the dense scores and BM25's `weight_mask`).
-- **Without it:** the smoke test answered **1,882**, another matter's HHI, instead of **3,552**.
+- **Without it:** in the smoke test, 2 of the top-3 evidence strips for the South Central HHI question came from *other matters'* HHI tables (2,666 and ~927).
 - In legal practice, mixing matters is both a correctness bug and a confidentiality bug.
 - `task_id=None` searches the whole corpus.
 
