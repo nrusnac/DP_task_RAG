@@ -1,0 +1,25 @@
+{
+ "n_tasks": 31,
+ "n_docs": 230,
+ "n_chunks": 5756,
+ "tokens_total": 2085623,
+ "tokens_median": 358,
+ "tokens_p95": 594,
+ "tokens_max": 1008,
+ "by_kind": {
+  "text": 4283,
+  "table": 1012,
+  "slide": 309,
+  "email": 152
+ },
+ "by_doc_type": {
+  "docx": 4607,
+  "xlsx": 686,
+  "pptx": 309,
+  "eml": 152,
+  "txt": 2
+ },
+ "tracked_change_chunks": 27,
+ "failures": [],
+ "seconds": 21.9
+}

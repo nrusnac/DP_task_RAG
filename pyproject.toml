@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hrag"
+version = "0.1.0"
+description = "Advanced + agentic RAG over the Harvey LAB antitrust data rooms"
+requires-python = ">=3.10"
+dependencies = [
+    "lxml",
+    "openpyxl",
+    "python-pptx",
+    "numpy",
+    "pandas",
+    "pyarrow",
+    "transformers",
+    "sentence-transformers",
+    "bm25s",
+    "claude-agent-sdk",
+    "anthropic",
+    "langgraph",
+]
+
+[project.optional-dependencies]
+obs = ["arize-phoenix", "arize-phoenix-otel", "openinference-instrumentation-langchain"]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
