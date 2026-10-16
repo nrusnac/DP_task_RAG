@@ -26,7 +26,7 @@ Each technique fixes a specific way naive RAG (fixed-size chunks → embed → t
 - **Idea** ([Anthropic, 2024](https://www.anthropic.com/news/contextual-retrieval)): an LLM writes a 1–2 sentence context per chunk, using the whole document, and it is prepended before embedding and BM25 indexing. Anthropic reports 35% fewer top-20 retrieval failures, 49% with contextual BM25, and 67% with reranking.
 - **The T4 forced a redesign:**
   - The original recipe (one document + one chunk per prompt) measured **2.62 s/chunk ≈ 2.9 h**: the ~8k-token document is re-sent for every ~60-token output, and the prefix cache helped little.
-  - **Our variant sends each document once** with inline `[[c1]]…[[cN]]` markers and asks for one line per chunk. Measured **0.98 s/chunk, 99.6% coverage**, and more specific contexts.
+  - **Our variant sends each document once** with inline `[[c1]]…[[cN]]` markers and asks for one line per chunk. Measured **0.98 s/chunk, 99.6% coverage** on a 20-doc benchmark; the full run covered **98.3% of 5,756 chunks in ~90 min** (the rest keep the header only). Contexts are more specific too.
   - Documents over 10k tokens run in windows, each window carrying the document's opening for orientation.
 - **Model:** Qwen2.5-3B-Instruct on vLLM (fp16; Triton attention, because the T4 has no FlashAttention). It runs in its own venv as a subprocess, so its torch can't break the notebook and its VRAM is released on exit.
 - **Ablation:** `raw` vs. `header` vs. `ctx` index variants.
