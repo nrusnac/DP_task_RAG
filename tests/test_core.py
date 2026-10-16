@@ -80,3 +80,20 @@ def test_docx_tracked_changes_and_malformed_xml():
     broken = next(AREA.glob("*/documents/jv-business-plan-final.docx"))
     _, els = parse(broken)  # unescaped '&' in the XML must not crash
     assert len(els) > 10
+
+
+def test_llm_counter_isolated_per_task():
+    import asyncio
+    from hrag import llm
+
+    async def fake_run(n):
+        ctr = llm.start_counter()
+        for _ in range(n):
+            c = llm._COUNTER.get(); c["calls"] += 1
+            await asyncio.sleep(0)
+        return ctr["calls"]
+
+    async def main():
+        return await asyncio.gather(fake_run(1), fake_run(3), fake_run(2))
+
+    assert asyncio.run(main()) == [1, 3, 2]

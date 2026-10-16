@@ -12,6 +12,7 @@ it takes precedence over OAuth and would silently bill the API instead of the su
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
 import time
@@ -74,6 +75,15 @@ class LLMStats:
 
 
 STATS = LLMStats()
+# Per-run call counter. Global STATS deltas are wrong under concurrency (other questions' calls leak in), so each
+# answer() / baseline run sets its own counter; child asyncio tasks inherit it by reference.
+_COUNTER: contextvars.ContextVar[dict | None] = contextvars.ContextVar("hrag_llm_counter", default=None)
+
+
+def start_counter() -> dict:
+    c = {"calls": 0}
+    _COUNTER.set(c)
+    return c
 _SEM: asyncio.Semaphore | None = None
 
 
@@ -148,6 +158,9 @@ async def complete(prompt: str, *, system: str = "You are a precise legal resear
     for attempt in range(retries + 1):
         async with _sem():
             t0 = time.perf_counter()
+            ctr = _COUNTER.get()
+            if ctr is not None:
+                ctr["calls"] += 1
             with tracing.span(f"llm.{purpose}", kind="LLM", **{
                     "llm.model_name": model, "input.value": prompt[:20000], "llm.backend": backend()}) as sp:
                 try:

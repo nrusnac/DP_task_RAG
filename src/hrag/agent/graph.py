@@ -292,7 +292,7 @@ def build_graph():
 # --------------------------------------------------------------------------------------------- public API
 async def answer(question: str, task_id: str | None = None, policy: str = "adaptive", variant: str = "ctx") -> dict[str, Any]:
     t0 = time.perf_counter()
-    calls0 = llm.STATS.calls
+    ctr = llm.start_counter()
     load_calibration()
     state = State(question=question, task_id=task_id, matter=_matters().get(task_id, "whole antitrust corpus"),
                   policy=policy, variant=variant, log=[], subqs=[], iteration=0)
@@ -304,7 +304,7 @@ async def answer(question: str, task_id: str | None = None, policy: str = "adapt
                    evidence=out.get("evidence", []), log=out.get("log", []),
                    subqs=[dict(q=s["q"], status=s["status"], rounds=s["rounds"], best=round(s["best"], 3),
                                n_strips=len(s["strips"])) for s in out.get("subqs", [])],
-                   llm_calls=llm.STATS.calls - calls0, seconds=round(time.perf_counter() - t0, 1))
+                   llm_calls=ctr["calls"], seconds=round(time.perf_counter() - t0, 1))
         tracing.set_attrs(sp, **{"output.value": res["answer"], "route": res["route"], "llm_calls": res["llm_calls"]})
         return res
 
