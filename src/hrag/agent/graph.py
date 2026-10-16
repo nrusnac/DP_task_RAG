@@ -62,6 +62,19 @@ def retriever(variant: str = "ctx") -> HybridRetriever:
 
 
 @lru_cache(maxsize=1)
+def load_calibration() -> dict:
+    """Use CRAG thresholds calibrated by `run_eval calibrate` (positives vs. cross-matter negatives) when available.
+    HRAG_CRAG_HIGH / HRAG_CRAG_LOW environment variables take precedence."""
+    import os
+    path = CFG.artifacts_dir / "eval" / "crag_calibration.json"
+    if path.exists() and not os.environ.get("HRAG_CRAG_HIGH"):
+        sug = json.loads(path.read_text()).get("suggested", {})
+        CFG.crag_high = float(sug.get("crag_high", CFG.crag_high))
+        CFG.crag_low = float(sug.get("crag_low", CFG.crag_low))
+    return dict(crag_high=CFG.crag_high, crag_low=CFG.crag_low)
+
+
+@lru_cache(maxsize=1)
 def _matters() -> dict[str, str]:
     out = {}
     with open(CFG.artifacts_dir / "tasks.jsonl") as f:
@@ -280,6 +293,7 @@ def build_graph():
 async def answer(question: str, task_id: str | None = None, policy: str = "adaptive", variant: str = "ctx") -> dict[str, Any]:
     t0 = time.perf_counter()
     calls0 = llm.STATS.calls
+    load_calibration()
     state = State(question=question, task_id=task_id, matter=_matters().get(task_id, "whole antitrust corpus"),
                   policy=policy, variant=variant, log=[], subqs=[], iteration=0)
     with tracing.span("agent.answer", kind="AGENT", **{"input.value": question, "task_id": task_id or "corpus",

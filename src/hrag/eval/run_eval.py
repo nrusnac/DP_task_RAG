@@ -36,19 +36,24 @@ def available_variants() -> list[str]:
 def retrieval(variants: list[str] | None = None) -> dict:
     from ..agent.graph import retriever
     items = [i for i in load_qa() if i["gold"]]
-    configs = [("bm25", False), ("dense", False), ("hybrid", False), ("hybrid", True)]
+    # (mode, rerank, scoped): scoped = search only the matter's data room; unscoped = whole corpus (harder, and shows
+    # cross-matter contamination: the share of top-5 hits that belong to OTHER matters)
+    configs = [("bm25", False, True), ("dense", False, True), ("hybrid", False, True), ("hybrid", True, True),
+               ("dense", False, False), ("hybrid", True, False)]
     results = {}
     for v in variants or available_variants():
         R = retriever(v)
-        for mode, rr in configs:
-            name = f"{v}/{mode}{'+rerank' if rr else ''}"
+        for mode, rr, scoped in configs:
+            name = f"{v}/{mode}{'+rerank' if rr else ''}{'' if scoped else ' (corpus-wide)'}"
             t0 = time.perf_counter()
-            rows = []
+            rows, foreign = [], []
             for it in items:
-                hits = R.search(it["question"], task_id=it["task_id"], mode=mode, rerank=rr, top=10)
+                hits = R.search(it["question"], task_id=it["task_id"] if scoped else None, mode=mode, rerank=rr, top=10)
                 rows.append(dict(ranked=[h.chunk_id for h in hits], gold=set(it["gold"]),
                                  top_score=hits[0].score if hits else 0.0))
-            results[name] = summarize(rows) | {"ms_per_query": round((time.perf_counter() - t0) * 1000 / len(items))}
+                foreign.append(sum(h.meta["task_id"] != it["task_id"] for h in hits[:5]) / 5)
+            results[name] = summarize(rows) | {"foreign@5": round(float(np.mean(foreign)), 3),
+                                               "ms_per_query": round((time.perf_counter() - t0) * 1000 / len(items))}
             print(name, results[name], flush=True)
     EVAL_DIR.mkdir(parents=True, exist_ok=True)
     (EVAL_DIR / "retrieval_results.json").write_text(json.dumps(results, indent=1))
@@ -56,32 +61,53 @@ def retrieval(variants: list[str] | None = None) -> dict:
 
 
 # ------------------------------------------------------------------------------------------- CRAG calibration
-def calibrate(variant: str | None = None) -> dict:
-    """Is the top rerank score predictive of 'a gold chunk was retrieved'? Pick tau_high / tau_low from it."""
+def calibrate(variant: str | None = None, seed: int = 11) -> dict:
+    """Calibrate CRAG's reranker thresholds with POSITIVES and cross-matter NEGATIVES.
+
+    The QA set only has answerable questions, and their top rerank scores saturate (most >= 0.95), so it can't tell
+    a good retrieval from a bad one. Negatives come free: ask each question against a DIFFERENT matter's data room,
+    where the answer cannot exist. Then:
+      tau_high = lowest score at which a 'correct' verdict is >= 90% precise (positives with gold retrieved)
+      tau_low  = highest score below which >= 90% of queries are negatives
+    and the band in between goes to the LLM grader.
+    """
     from ..agent.graph import retriever
     v = variant or available_variants()[-1]
     R = retriever(v)
-    rows = []
+    rng = random.Random(seed)
+    tasks = sorted(set(R.task_ids))
+    pos, neg = [], []
     for it in [i for i in load_qa() if i["gold"]]:
         hits = R.search(it["question"], task_id=it["task_id"], top=CFG.rerank_top)
-        rows.append((hits[0].score if hits else 0.0, any(h.chunk_id in set(it["gold"]) for h in hits)))
-    s = np.array([r[0] for r in rows]); ok = np.array([r[1] for r in rows])
+        pos.append((hits[0].score if hits else 0.0, any(h.chunk_id in set(it["gold"]) for h in hits)))
+        other = rng.choice([t for t in tasks if t != it["task_id"]])
+        hits = R.search(it["question"], task_id=other, top=CFG.rerank_top)
+        neg.append(hits[0].score if hits else 0.0)
+    ps = np.array([p[0] for p in pos]); ok = np.array([p[1] for p in pos]); ns = np.array(neg)
+    good = ps[ok]  # positives where retrieval actually found the gold chunk
+    # Error-free band edges on the calibration set: below tau_low there is no answerable question (incorrect is
+    # safe), above tau_high there is no unanswerable one (correct is safe); in between, the LLM grader decides.
+    tau_low = float(np.floor(ps.min() * 100) / 100) if len(ps) else CFG.crag_low
+    tau_high = float(np.ceil((ns.max() + 1e-9) * 100) / 100) if len(ns) else CFG.crag_high
+    if tau_low > tau_high:  # classes don't overlap: no ambiguous band needed
+        tau_low = tau_high = round((tau_low + tau_high) / 2, 2)
+    q = lambda a: [round(float(x), 3) for x in np.quantile(a, [0.1, 0.25, 0.5, 0.75, 0.9])] if len(a) else []  # noqa: E731
     buckets = []
-    for lo, hi in [(0, .3), (.3, .5), (.5, .6), (.6, .7), (.7, .8), (.8, .9), (.9, .95), (.95, 1.01)]:
-        m = (s >= lo) & (s < hi)
-        buckets.append(dict(range=f"[{lo:.2f},{min(hi, 1):.2f})", n=int(m.sum()),
-                            gold_retrieved=round(float(ok[m].mean()), 2) if m.any() else None))
-    # tau_high: lowest bucket edge above which >= 85% of queries had gold; tau_low: highest edge below which <= 35%
-    tau_high, tau_low = CFG.crag_high, CFG.crag_low
-    for b in buckets:
-        if b["n"] and b["gold_retrieved"] is not None and b["gold_retrieved"] >= .85:
-            tau_high = float(b["range"][1:].split(",")[0]); break
-    for b in reversed(buckets):
-        if b["n"] and b["gold_retrieved"] is not None and b["gold_retrieved"] <= .35:
-            tau_low = float(b["range"][:-1].split(",")[1]); break
-    out = dict(variant=v, n=len(rows), overall_gold_retrieved=round(float(ok.mean()), 3), buckets=buckets,
-               suggested=dict(crag_high=tau_high, crag_low=min(tau_low, tau_high)),
-               current=dict(crag_high=CFG.crag_high, crag_low=CFG.crag_low))
+    for lo, hi in [(0, .1), (.1, .3), (.3, .5), (.5, .7), (.7, .9), (.9, .95), (.95, .99), (.99, 1.01)]:
+        mp, mn = (ps >= lo) & (ps < hi), (ns >= lo) & (ns < hi)
+        buckets.append(dict(range=f"[{lo:.2f},{min(hi, 1):.2f})", positives=int(mp.sum()), negatives=int(mn.sum()),
+                            gold_retrieved=round(float(ok[mp].mean()), 2) if mp.any() else None))
+    out = dict(variant=v, n_pos=len(pos), n_neg=len(neg), pos_gold_retrieved=round(float(ok.mean()), 3),
+               pos_quantiles_p10_p90=q(ps), neg_quantiles_p10_p90=q(ns), buckets=buckets,
+               suggested=dict(crag_high=tau_high, crag_low=tau_low),
+               raw=dict(pos=[round(float(x), 4) for x in ps], pos_ok=[bool(x) for x in ok],
+                        neg=[round(float(x), 4) for x in ns]),
+               coverage=dict(correct_pos=round(float((good >= tau_high).mean()), 3) if len(good) else None,
+                             incorrect_neg=round(float((ns < tau_low).mean()), 3),
+                             ambiguous_share=round(float(np.mean(np.r_[(ps >= tau_low) & (ps < tau_high),
+                                                                       (ns >= tau_low) & (ns < tau_high)])), 3)),
+               previous=dict(crag_high=CFG.crag_high, crag_low=CFG.crag_low))
+    CFG.crag_high, CFG.crag_low = tau_high, tau_low  # apply immediately for the rest of this session
     EVAL_DIR.mkdir(parents=True, exist_ok=True)
     (EVAL_DIR / "crag_calibration.json").write_text(json.dumps(out, indent=1))
     print(json.dumps(out, indent=1))

@@ -25,14 +25,15 @@ def render() -> str:
         rows = [dict(v, _name=f"`{k}`") for k, v in res.items()]
         n = next(iter(res.values())).get("n")
         parts.append(f"**Retrieval** ({n} questions with silver labels, scoped to the matter's data room)\n\n"
-                     + _table(rows, ["recall@1", "recall@5", "recall@10", "mrr", "ndcg@10", "ms_per_query"], "variant / mode"))
+                     + _table(rows, ["recall@1", "recall@5", "recall@10", "mrr", "ndcg@10", "foreign@5", "ms_per_query"], "variant / mode"))
     p = EV / "crag_calibration.json"
     if p.exists():
         cal = json.loads(p.read_text())
-        rows = [dict(b, _name=b["range"]) for b in cal["buckets"] if b["n"]]
-        parts.append(f"**CRAG calibration** (top rerank score vs. share of questions whose gold chunk was in the top-8; "
-                     f"variant `{cal['variant']}`). Suggested thresholds: `{cal['suggested']}`\n\n"
-                     + _table(rows, ["n", "gold_retrieved"], "top rerank score"))
+        rows = [dict(b, _name=b["range"]) for b in cal["buckets"] if b["positives"] or b["negatives"]]
+        parts.append(f"**CRAG calibration** (variant `{cal['variant']}`): top rerank score for answerable questions "
+                     f"(positives) vs. the same questions asked against another matter's data room (negatives). "
+                     f"Suggested thresholds `{cal['suggested']}`; coverage `{cal['coverage']}`\n\n"
+                     + _table(rows, ["positives", "gold_retrieved", "negatives"], "top rerank score"))
     for p in sorted(EV.glob("summary_gen_*.json")):
         s = json.loads(p.read_text())
         rows = [dict(v, _name=f"`{k}`", routes=", ".join(f"{a}:{b}" for a, b in (v.get("routes") or {}).items()))

@@ -47,9 +47,12 @@ class Config:
     rerank_candidates: int = 30
     rerank_top: int = 8
 
-    # CRAG (reranker sigmoid scores are compressed high: median 0.76 on weak candidates, so not 0.5)
-    crag_high: float = _env("CRAG_HIGH", 0.90)
-    crag_low: float = _env("CRAG_LOW", 0.60)
+    # CRAG thresholds on the top rerank score. Defaults come from calibration on the header index (60 answerable
+    # questions vs. 60 cross-matter negatives): no answerable question scored below 0.65 and no unanswerable one above
+    # 0.92; ~11% of retrievals fall in between and go to the LLM grader. Overridden at runtime by
+    # artifacts/eval/crag_calibration.json (see agent.graph.load_calibration).
+    crag_high: float = _env("CRAG_HIGH", 0.92)
+    crag_low: float = _env("CRAG_LOW", 0.65)
     strip_threshold: float = _env("STRIP_THRESHOLD", 0.50)
     strips_per_subq: int = 12
     max_corrective_rounds: int = 2

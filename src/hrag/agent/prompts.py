@@ -40,8 +40,9 @@ GRADE_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["r
 
 REWRITE = """A document search for this question returned weak results (CRAG corrective step).
 Write:
-1. keywords: a BM25 keyword query of 5-12 terms (exact names, figures, defined terms, section/heading words likely to
-   appear verbatim in the document), different from the failed query;
+1. keywords: a BM25 keyword query of 5-12 terms likely to appear verbatim in the document (names and terms from the
+   question, synonyms, defined-term and section/heading vocabulary), different from the failed query. NEVER invent
+   names or figures here: BM25 matches literally, so invented terms only add noise;
 2. hyde: a hypothetical 60-100 word passage written as the matter's document that would contain the answer (HyDE).
    Invented details are fine: it is only a search probe.
 
@@ -53,8 +54,11 @@ REWRITE_SCHEMA = {"type": "object", "additionalProperties": False, "required": [
                   "properties": {"keywords": {"type": "string"}, "hyde": {"type": "string"}}}
 
 SUFFICIENCY = """Given the question and the evidence gathered so far (grouped by sub-question), decide whether the
-evidence is sufficient for a complete, accurate answer. If not, list up to 3 NEW sub-questions for what is missing
-(do not repeat earlier sub-questions; leave the list empty if nothing more could plausibly be found).
+evidence is sufficient for a complete, accurate answer. If not, list up to 3 NEW sub-questions for what is missing.
+Only ask for information that THIS MATTER'S OWN DOCUMENTS could contain (deal facts, figures, parties' statements,
+internal analyses). Never ask for current law, updated thresholds, market news or anything outside the data room;
+the answer will flag those as needing outside verification. Do not repeat earlier sub-questions. Leave the list
+empty if nothing more could plausibly be found in the documents.
 
 Question: {question}
 

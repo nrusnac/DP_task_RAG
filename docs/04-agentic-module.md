@@ -35,6 +35,16 @@ State: `question, task_id, route, subqs[{q, query, hyde, rounds, status, best, h
 | ambiguous | τ_low ≤ best < τ_high, and Haiku judges ≥ 1 of the top 5 relevant | refine the relevant hits **and** one corrective retrieval; merge |
 | incorrect | best < τ_low, or Haiku judges none relevant | rewrite (BM25 keywords + HyDE) and retrieve again; after 2 rounds, mark **insufficient** and abstain on that sub-question |
 
+**Thresholds are measured, not guessed** (`run_eval.py calibrate`). The QA set has only answerable questions, whose top
+rerank scores saturate (p10 = 0.89), so on its own it can't calibrate anything. We add **cross-matter negatives**: each
+question is also asked against another matter's data room, where its answer cannot exist (median top score 0.017). On
+the 60 + 60 calibration queries:
+- **τ_low = 0.65:** no answerable question scored below it. It catches 90% of negatives without an LLM call.
+- **τ_high = 0.92:** no unanswerable question scored above it. It passes 91% of positives without an LLM call.
+- **In between (10.8% of retrievals):** the Haiku grader decides.
+
+That is CRAG's three-way evaluator with measured, error-free boundaries on the calibration set.
+
 **Deviations from the paper, and why:**
 - **Evaluator:** our existing cross-encoder replaces the paper's fine-tuned T5, with thresholds calibrated on our eval set. The LLM is called only in the ambiguous band, which keeps cost low.
 - **No web-search fallback:** the facts are matter-specific and the data room is confidential, so we abstain instead.

@@ -1,0 +1,38 @@
+{
+ "header/bm25": {
+  "recall@1": 0.633,
+  "recall@5": 0.85,
+  "recall@10": 0.95,
+  "mrr": 0.725,
+  "ndcg@10": 0.67,
+  "n": 60,
+  "ms_per_query": 1
+ },
+ "header/dense": {
+  "recall@1": 0.55,
+  "recall@5": 0.85,
+  "recall@10": 0.933,
+  "mrr": 0.683,
+  "ndcg@10": 0.612,
+  "n": 60,
+  "ms_per_query": 194
+ },
+ "header/hybrid": {
+  "recall@1": 0.6,
+  "recall@5": 0.9,
+  "recall@10": 0.95,
+  "mrr": 0.72,
+  "ndcg@10": 0.671,
+  "n": 60,
+  "ms_per_query": 39
+ },
+ "header/hybrid+rerank": {
+  "recall@1": 0.617,
+  "recall@5": 0.85,
+  "recall@10": 0.917,
+  "mrr": 0.714,
+  "ndcg@10": 0.673,
+  "n": 60,
+  "ms_per_query": 5949
+ }
+}
