@@ -1,0 +1,19 @@
+{
+ "agent": {
+  "n": 10,
+  "errors": 0,
+  "pass_rate": 0.9,
+  "pass_rate_fact": 0.8,
+  "pass_rate_analysis": 1.0,
+  "faithful_rate": 0.5,
+  "abstain_rate": 0.0,
+  "evidence_has_gold": 0.714,
+  "avg_evidence_words": 871.1,
+  "avg_llm_calls": 4.3,
+  "avg_seconds": 138.96,
+  "routes": {
+   "complex": 2,
+   "simple": 8
+  }
+ }
+}

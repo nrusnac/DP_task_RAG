@@ -1,0 +1,14 @@
+{
+ "single_shot": {
+  "n": 12,
+  "declined_rate": 0.917,
+  "hallucination_rate": 0.083,
+  "avg_llm_calls": 1.0
+ },
+ "agent": {
+  "n": 12,
+  "declined_rate": 0.833,
+  "hallucination_rate": 0.167,
+  "avg_llm_calls": 7.42
+ }
+}

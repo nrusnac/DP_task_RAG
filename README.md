@@ -53,10 +53,12 @@ All design choices, with alternatives and measurements: [docs/07-decision-log.md
   - Every agent failure was **over-pruning by CRAG refinement** on list, enumeration and clause questions, with the gold chunk retrieved and graded correct. Fixed by passing clearly relevant hits whole.
   - The agent uses **85% less evidence** and has the highest faithfulness.
 - **Adaptive-RAG:** 0.90 at 4.1 calls, vs. always-complex 0.85 at 7.6 calls and always-simple 0.85 at 1.45 calls.
-- **Unanswerable questions** (the agent's real job) are in the last table.
+- **After fixing over-pruning:** 3 of the 4 failures pass with no regressions (targeted re-run), projecting to about 29/30, on par with single-shot.
+- **Unanswerable questions** (asked in the wrong matter's data room): single-shot declined 11/12, the agent 10/12. **Not better.** The grounded generator prompt does most of the declining, and CRAG's corrective search can surface look-alike evidence.
+- **Bottom line:** the accuracy came from the retrieval techniques (hybrid, rerank, scoping). The agent adds control, cost savings (less context, adaptive routing) and auditability, not accuracy, on this benchmark.
 
 <!-- RESULTS:START -->
-**Retrieval** (57 questions with silver labels, scoped to the matter's data room)
+**Retrieval** (57 questions with silver labels; searched within the matter's data room unless marked corpus-wide; `foreign@5` = share of top-5 hits from other matters)
 
 | variant / mode | recall@1 | recall@5 | recall@10 | mrr | ndcg@10 | foreign@5 | ms_per_query |
 |---|---|---|---|---|---|---|---|
@@ -92,6 +94,12 @@ All design choices, with alternatives and measurements: [docs/07-decision-log.md
 | [0.95,0.99) | 12 | 0.92 | 0 |
 | [0.99,1.00) | 38 | 0.92 | 0 |
 
+**Generation** (after the refinement fix, local re-run, `header` index, same 30 questions; Harvey rubric judge = Claude Sonnet)
+
+| system | n | pass_rate | pass_rate_fact | pass_rate_analysis | faithful_rate | abstain_rate | evidence_has_gold | avg_evidence_words | avg_llm_calls | avg_seconds | routes |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `agent` | 10 | 0.9 | 0.8 | 1.0 | 0.5 | 0.0 | 0.714 | 871.1 | 4.3 | 138.96 | complex:2, simple:8 |
+
 **Generation** (Adaptive-RAG ablation, Colab T4, `ctx` index, 20 questions; Harvey rubric judge = Claude Sonnet)
 
 | system | n | pass_rate | pass_rate_fact | pass_rate_analysis | faithful_rate | abstain_rate | evidence_has_gold | avg_evidence_words | avg_llm_calls | avg_seconds | routes |
@@ -107,6 +115,13 @@ All design choices, with alternatives and measurements: [docs/07-decision-log.md
 | `agent` | 30 | 0.867 | 0.85 | 0.9 | 0.7 | 0.167 | 0.889 | 335.967 | 3.133 | 24.147 | simple:27, complex:3 |
 | `naive` | 30 | 0.9 | 0.95 | 0.8 | 0.633 | 0.1 | 0.944 | 1978.267 | 1.0 | 11.153 | fixed:30 |
 | `single_shot` | 30 | 0.967 | 0.95 | 1.0 | 0.667 | 0.1 | 0.889 | 2226.733 | 1.0 | 12.543 | fixed:30 |
+
+**Unanswerable questions** (`header` index; each question asked in ANOTHER matter's data room; judged by Claude Haiku: did the answer decline?)
+
+| system | n | declined_rate | hallucination_rate | avg_llm_calls |
+|---|---|---|---|---|
+| `single_shot` | 12 | 0.917 | 0.083 | 1.0 |
+| `agent` | 12 | 0.833 | 0.167 | 7.42 |
 <!-- RESULTS:END -->
 
 ## Quickstart

@@ -51,7 +51,7 @@ Every eval item is a traced span (`eval.item`), so failures can be opened in Pho
 Run on a Colab T4 with `notebooks/02_demo_and_eval.ipynb`. The JSON outputs are in `artifacts/eval/`.
 
 <!-- RESULTS:START -->
-**Retrieval** (57 questions with silver labels, scoped to the matter's data room)
+**Retrieval** (57 questions with silver labels; searched within the matter's data room unless marked corpus-wide; `foreign@5` = share of top-5 hits from other matters)
 
 | variant / mode | recall@1 | recall@5 | recall@10 | mrr | ndcg@10 | foreign@5 | ms_per_query |
 |---|---|---|---|---|---|---|---|
@@ -87,6 +87,12 @@ Run on a Colab T4 with `notebooks/02_demo_and_eval.ipynb`. The JSON outputs are 
 | [0.95,0.99) | 12 | 0.92 | 0 |
 | [0.99,1.00) | 38 | 0.92 | 0 |
 
+**Generation** (after the refinement fix, local re-run, `header` index, same 30 questions; Harvey rubric judge = Claude Sonnet)
+
+| system | n | pass_rate | pass_rate_fact | pass_rate_analysis | faithful_rate | abstain_rate | evidence_has_gold | avg_evidence_words | avg_llm_calls | avg_seconds | routes |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `agent` | 10 | 0.9 | 0.8 | 1.0 | 0.5 | 0.0 | 0.714 | 871.1 | 4.3 | 138.96 | complex:2, simple:8 |
+
 **Generation** (Adaptive-RAG ablation, Colab T4, `ctx` index, 20 questions; Harvey rubric judge = Claude Sonnet)
 
 | system | n | pass_rate | pass_rate_fact | pass_rate_analysis | faithful_rate | abstain_rate | evidence_has_gold | avg_evidence_words | avg_llm_calls | avg_seconds | routes |
@@ -102,6 +108,13 @@ Run on a Colab T4 with `notebooks/02_demo_and_eval.ipynb`. The JSON outputs are 
 | `agent` | 30 | 0.867 | 0.85 | 0.9 | 0.7 | 0.167 | 0.889 | 335.967 | 3.133 | 24.147 | simple:27, complex:3 |
 | `naive` | 30 | 0.9 | 0.95 | 0.8 | 0.633 | 0.1 | 0.944 | 1978.267 | 1.0 | 11.153 | fixed:30 |
 | `single_shot` | 30 | 0.967 | 0.95 | 1.0 | 0.667 | 0.1 | 0.889 | 2226.733 | 1.0 | 12.543 | fixed:30 |
+
+**Unanswerable questions** (`header` index; each question asked in ANOTHER matter's data room; judged by Claude Haiku: did the answer decline?)
+
+| system | n | declined_rate | hallucination_rate | avg_llm_calls |
+|---|---|---|---|---|
+| `single_shot` | 12 | 0.917 | 0.083 | 1.0 |
+| `agent` | 12 | 0.833 | 0.167 | 7.42 |
 <!-- RESULTS:END -->
 
 ## Analysis (honest reading of the numbers)
@@ -131,7 +144,26 @@ Run on a Colab T4 with `notebooks/02_demo_and_eval.ipynb`. The JSON outputs are 
 
 **Adaptive-RAG (20 questions):** adaptive **0.90 at 4.1 calls / 40 s**, vs. always-complex 0.85 at 7.6 calls / 67 s and always-simple 0.85 at 1.45 calls / 20 s. The router sent 16/20 questions down the simple path. Adaptive matched or beat both fixed policies at about half the cost of always-complex. (n = 20, so one question is 5 points.)
 
-**The bigger picture.** This QA set contains **only answerable, mostly single-passage questions**, where a strong fixed pipeline (hybrid + rerank + Sonnet) is already near the ceiling (96.7%). On such a set an agent can't win on accuracy and can only lose by over-abstaining or over-pruning. What the agent is *for* is the situation a fixed pipeline handles worst: **the answer isn't in the documents.** That is measured below with unanswerable questions.
+**After the refinement fix** (targeted local re-run on the `header` index: the 4 failed questions + 6 previously passed ones):
+- **3 of 4 failures now pass, with no regressions** (6/6 still pass), so 9/10 overall.
+- Evidence per answer is 871 words, still −61% vs. single-shot.
+- The remaining failure is "list all 25 custodians": the list spans more chunks than are kept whole, a real limit for exhaustive enumerations.
+- Applied to the 30-question set, the agent would score about **29/30, on par with single-shot**. This is a projection, not a full re-run, and the index variant differs.
+
+**Unanswerable questions** (12 questions, each asked in another matter's data room; `header` index, local):
+- Single-shot declined **11/12**; the agent declined **10/12** at 7.4 vs. 1 LLM calls.
+- The difference is one question (noise), but the hypothesis that the agent abstains better is **not supported**. Two reasons from the traces:
+  1. The **shared grounded generator prompt** ("say 'the documents do not establish …'") already makes Sonnet decline when evidence is unrelated, in both systems.
+  2. **CRAG's corrective loop cuts both ways.** Rewrite + HyDE *searches harder* and can surface look-alike evidence from the wrong data room (e.g. another matter's IT memo on employees' personal devices), which the generator then answers from.
+
+  A stricter grader on corrective rounds, or abstaining when only rewritten queries find evidence, would be the next step.
+
+**Conclusion.** With a strong generator and a grounded prompt, a well-built **single-shot advanced pipeline** (structure-aware chunks, hybrid + RRF, cross-encoder rerank, data-room scoping) is already near the ceiling on this benchmark's fact-and-analysis questions. In our measurements the agentic layer did **not** improve accuracy. What it did deliver:
+- **Efficiency:** 61–85% less context per answer; adaptive routing at half the cost of always-complex with equal or better accuracy.
+- **Auditability:** every route, CRAG verdict and rewrite is logged and traced.
+- **A diagnosable structure:** each failure was attributable to one node (refinement over-pruning; corrective search finding look-alikes) and fixable there.
+
+For the 15-minute defense, this is the honest result: the agent is justified by control, cost and transparency, while the accuracy wins came from the retrieval techniques underneath it.
 
 ## Findings that changed the design
 - **The silver labels favour BM25 by construction.** A chunk is gold *because* it contains the verbatim key facts, which is exactly what BM25 matches. So BM25's strong showing within a matter is partly a labelling artefact. Hybrid search is the safer default: it never loses much to the best single retriever and wins on Recall@5.

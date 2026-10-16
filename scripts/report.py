@@ -24,7 +24,7 @@ def render() -> str:
         res = json.loads(p.read_text())
         rows = [dict(v, _name=f"`{k}`") for k, v in res.items()]
         n = next(iter(res.values())).get("n")
-        parts.append(f"**Retrieval** ({n} questions with silver labels, scoped to the matter's data room)\n\n"
+        parts.append(f"**Retrieval** ({n} questions with silver labels; searched within the matter's data room unless marked corpus-wide; `foreign@5` = share of top-5 hits from other matters)\n\n"
                      + _table(rows, ["recall@1", "recall@5", "recall@10", "mrr", "ndcg@10", "foreign@5", "ms_per_query"], "variant / mode"))
     p = EV / "crag_calibration.json"
     if p.exists():
