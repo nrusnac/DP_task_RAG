@@ -4,6 +4,7 @@
     python -m hrag.eval.run_eval calibrate                       # CRAG thresholds from rerank-score distributions
     python -m hrag.eval.run_eval generation --n 40 --systems naive single_shot agent
     python -m hrag.eval.run_eval generation --n 20 --systems agent:simple agent:complex agent   # Adaptive-RAG ablation
+    python -m hrag.eval.run_eval negatives --n 12 --systems single_shot agent                   # unanswerable questions
 """
 from __future__ import annotations
 

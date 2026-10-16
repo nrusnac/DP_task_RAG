@@ -48,7 +48,7 @@ All design choices, with alternatives and measurements: [docs/07-decision-log.md
 - **Hybrid > BM25 or dense alone:** R@1 0.684 vs. 0.614, MRR 0.784 vs. 0.745 / 0.728. **Reranking** raises R@1 (0.667 → 0.702 on `header`) at some cost to R@5.
 - **Scoping to the matter's data room matters:** corpus-wide dense search puts ~17% of top-5 hits in *other* matters; hybrid + rerank cuts that to ~7%, and scoping to 0.
 - **Contextual Retrieval didn't measurably help on this eval.** The labels are verbatim-fact matches, a matter has only ~186 chunks, and the cheap deterministic header already gives most of the context. Reported as is.
-- **CRAG thresholds are measured:** answerable vs. cross-matter-negative questions are almost perfectly separated by the top rerank score (negatives median 0.017, positives p10 0.89).
+- **CRAG thresholds are measured with cross-matter negatives:** the top rerank score almost perfectly separates answerable from unanswerable questions (`ctx`: negatives median 0.011, positives p10 0.94). The error-free-band rule is outlier-sensitive (`ctx` τ 0.09 / 0.95, so 20% of retrievals are LLM-graded).
 - **Generation on answerable questions** (30 questions): single-shot advanced RAG 0.967, naive 0.90, agent 0.867.
   - Every agent failure was **over-pruning by CRAG refinement** on list, enumeration and clause questions, with the gold chunk retrieved and graded correct. Fixed by passing clearly relevant hits whole.
   - The agent uses **85% less evidence** and has the highest faithfulness.

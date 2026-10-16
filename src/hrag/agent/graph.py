@@ -96,8 +96,6 @@ async def route(state: State) -> dict:
     out = await llm.complete(P.ROUTER.format(matter=state["matter"], question=state["question"]), system=P.SYSTEM,
                              model=CFG.fast_llm, schema=P.ROUTER_SCHEMA, purpose="router")
     r = out.get("route", "complex")
-    if r == "direct" and state.get("task_id"):
-        pass  # allowed: e.g. "what can you do?"
     return {"route": r, "route_reason": out.get("reason", ""), "log": _log(state, f"route={r}: {out.get('reason', '')}")}
 
 

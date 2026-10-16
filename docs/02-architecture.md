@@ -48,7 +48,7 @@ flowchart TD
 | `plan` | question (+ already-searched list) → 2–5 sub-questions | Claude Sonnet (JSON) | multi-part questions need one retrieval per part |
 | `retrieve` | sub-question (+ HyDE) + `task_id` → top-8 reranked hits | BGE-M3 + BM25 → RRF(k=60) → bge-reranker-v2-m3 | hybrid recall, cross-encoder precision, data-room scoping |
 | `grade` | rerank scores → correct / ambiguous / incorrect | thresholds; Haiku only in the ambiguous band | CRAG retrieval evaluator |
-| `refine` | kept hits → relevant sentence or row strips | bge-reranker-v2-m3 at strip level | CRAG knowledge refinement (less noise, fewer tokens) |
+| `refine` | kept hits → hits ≥ τ_high kept whole (≤ 3), other hits reduced to relevant sentence or row strips | bge-reranker-v2-m3 at strip level | CRAG knowledge refinement (less noise, fewer tokens) without shredding lists and clauses |
 | `rewrite` | failed sub-question → BM25 keywords + HyDE passage (≤ 2 rounds) | Claude Haiku | CRAG corrective retrieval; abstain if still failing |
 | `sufficiency` | evidence per sub-question → missing sub-questions (1 iteration) | Claude Haiku | multi-hop gap filling |
 | `generate` | numbered strips + insufficiency flags → cited answer | Claude Sonnet | grounded, checkable output |

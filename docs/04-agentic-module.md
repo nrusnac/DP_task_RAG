@@ -37,13 +37,18 @@ State: `question, task_id, route, subqs[{q, query, hyde, rounds, status, best, h
 
 **Thresholds are measured, not guessed** (`run_eval.py calibrate`). The QA set has only answerable questions, whose top
 rerank scores saturate (p10 = 0.89), so on its own it can't calibrate anything. We add **cross-matter negatives**: each
-question is also asked against another matter's data room, where its answer cannot exist (median top score 0.017). On
-the 60 + 60 calibration queries:
-- **τ_low = 0.65:** no answerable question scored below it. It catches 90% of negatives without an LLM call.
-- **τ_high = 0.92:** no unanswerable question scored above it. It passes 91% of positives without an LLM call.
-- **In between (10.8% of retrievals):** the Haiku grader decides.
+question is also asked against another matter's data room, where its answer cannot exist (median top score 0.017). The rule: τ_low = the lowest score of any positive, τ_high = just above the highest negative. Both are error-free on
+the calibration set; in between, the Haiku grader decides.
 
-That is CRAG's three-way evaluator with measured, error-free boundaries on the calibration set.
+| Index | Positives p10 | Negatives median | τ_low | τ_high | Ambiguous share (LLM graded) |
+|---|---|---|---|---|---|
+| `header` (local) | 0.89 | 0.017 | 0.65 | 0.92 | 11% |
+| `ctx` (Colab; **what the committed agent loads**) | 0.94 | 0.011 | 0.09 | 0.95 | 20% |
+
+The two classes are almost perfectly separated, but the error-free rule is **sensitive to single outliers**. On `ctx`, one
+answerable question topped out below 0.10 and one negative reached 0.95, which widened the band, so more retrievals
+go to the LLM. That costs calls, not correctness. A percentile rule (e.g. 5th/95th) would be more robust and is
+the next step.
 
 **Deviations from the paper, and why:**
 - **Evaluator:** our existing cross-encoder replaces the paper's fine-tuned T5, with thresholds calibrated on our eval set. The LLM is called only in the ambiguous band, which keeps cost low.

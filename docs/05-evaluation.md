@@ -28,7 +28,9 @@ Drafting tasks are excluded, and `skip` criteria are dropped, because those crit
 - **MRR**
 - **nDCG@10**
 
-**CRAG calibration** (`run_eval.py calibrate`): buckets of the top rerank score against the share of questions whose gold chunk was retrieved. τ_high and τ_low are read off this table.
+**CRAG calibration** (`run_eval.py calibrate`): the top rerank score for answerable questions (positives) vs. the same questions asked in another matter's data room (cross-matter negatives). τ_low is the lowest positive score and τ_high is just above the highest negative; the band in between is LLM-graded.
+
+**Unanswerable questions** (`run_eval.py negatives`): the same cross-matter negatives run end to end through single-shot and the agent. A Haiku judge checks whether each answer declined instead of answering from look-alike evidence.
 
 **C4 · Generation** (`run_eval.py generation`): systems compared on the same questions:
 - `naive`: dense-only, raw-text index, top-8 chunks, one generation call
