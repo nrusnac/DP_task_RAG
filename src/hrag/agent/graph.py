@@ -45,6 +45,7 @@ class State(TypedDict, total=False):
     task_id: str | None
     matter: str
     policy: str          # adaptive | simple | complex (forced routes, for the ablation)
+    variant: str         # index variant: raw | header | ctx (LangGraph drops undeclared keys)
     route: str
     route_reason: str
     subqs: list[SubQ]
@@ -108,7 +109,7 @@ async def plan(state: State) -> dict:
 
 
 async def retrieve(state: State) -> dict:
-    R = retriever(state.get("variant", "ctx"))  # type: ignore[arg-type]
+    R = retriever(state.get("variant", "ctx"))
     subqs = [dict(s) for s in state["subqs"]]
     for s in subqs:
         if s["status"] != "pending":
@@ -155,7 +156,7 @@ async def grade(state: State) -> dict:
 
 async def refine(state: State) -> dict:
     """Knowledge refinement for correct/ambiguous; decide retry vs. insufficient for the rest."""
-    R = retriever(state.get("variant", "ctx"))  # type: ignore[arg-type]
+    R = retriever(state.get("variant", "ctx"))
     subqs = [dict(s) for s in state["subqs"]]
     for s in subqs:
         st = s["status"]
@@ -280,8 +281,7 @@ async def answer(question: str, task_id: str | None = None, policy: str = "adapt
     t0 = time.perf_counter()
     calls0 = llm.STATS.calls
     state = State(question=question, task_id=task_id, matter=_matters().get(task_id, "whole antitrust corpus"),
-                  policy=policy, log=[], subqs=[], iteration=0)
-    state["variant"] = variant  # type: ignore[typeddict-unknown-key]
+                  policy=policy, variant=variant, log=[], subqs=[], iteration=0)
     with tracing.span("agent.answer", kind="AGENT", **{"input.value": question, "task_id": task_id or "corpus",
                                                        "policy": policy, "variant": variant}) as sp:
         out = await build_graph().ainvoke(state, {"recursion_limit": 60})

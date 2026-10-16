@@ -21,9 +21,10 @@ def setup(project: str = "dp-task-rag", launch: bool = True) -> str | None:
 
     endpoint = os.environ.get("PHOENIX_COLLECTOR_ENDPOINT")
     if launch and not endpoint:
-        import phoenix as px
-        px.launch_app()
         endpoint = "http://127.0.0.1:6006"
+        if not _launch_phoenix(endpoint):
+            print("[tracing] Phoenix did not start; continuing without tracing")
+            return None
         SESSION_URL = endpoint
         try:  # Colab: expose the UI through the kernel proxy
             from google.colab.output import eval_js  # type: ignore
@@ -34,6 +35,38 @@ def setup(project: str = "dp-task-rag", launch: bool = True) -> str | None:
                   protocol="http/protobuf", auto_instrument=True, batch=False)
     _TRACER = tp.get_tracer("hrag")
     return SESSION_URL
+
+
+def _up(url: str) -> bool:
+    import urllib.request
+    try:
+        urllib.request.urlopen(url, timeout=2)
+        return True
+    except Exception:
+        return False
+
+
+def _launch_phoenix(url: str, wait_s: int = 90) -> bool:
+    """In-process launch_app() first (notebooks); fall back to a `phoenix serve` subprocess."""
+    import subprocess
+    import sys
+    import time
+    if _up(url):
+        return True
+    try:
+        import phoenix as px
+        px.launch_app()
+        return True
+    except Exception as e:  # e.g. "server took too long to start" on a busy machine
+        print(f"[tracing] launch_app failed ({e!r:.120}); starting `phoenix serve` subprocess")
+    subprocess.Popen([sys.executable, "-m", "phoenix.server.main", "serve"], stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL)
+    t0 = time.time()
+    while time.time() - t0 < wait_s:
+        if _up(url):
+            return True
+        time.sleep(1)
+    return False
 
 
 def _clean(v):
