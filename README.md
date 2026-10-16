@@ -20,7 +20,7 @@ RAG over the **`antitrust-competition`** practice area of [Harvey LAB](https://g
 
 **Agentic module** ([docs/04](docs/04-agentic-module.md)): a LangGraph controller for the **retrieval step**.
 - **Adaptive-RAG** routes each query (direct / simple / complex).
-- **CRAG** grades the evidence with reranker scores (Claude only when the score is ambiguous), refines it to relevant sentence strips, rewrites failing queries with keywords + HyDE, and **abstains** instead of guessing.
+- **CRAG** grades the evidence with reranker scores (Claude only when the score is ambiguous), passes clearly relevant hits whole and reduces marginal ones to relevant sentence strips, rewrites failing queries with keywords + HyDE, and **abstains** instead of guessing.
 - A sufficiency loop fills gaps on complex queries.
 - Every decision is logged and traced.
 
@@ -30,6 +30,7 @@ RAG over the **`antitrust-competition`** practice area of [Harvey LAB](https://g
 - CRAG threshold calibration
 - naive vs. single-shot vs. agent, judged with **Harvey's own rubric prompt** plus faithfulness
 - the Adaptive-RAG ablation
+- unanswerable questions (each asked in another matter's data room)
 
 **Observability** ([docs/06](docs/06-observability.md)): Arize Phoenix in the notebook, with LangGraph auto-instrumented and manual retriever, reranker and LLM spans.
 
