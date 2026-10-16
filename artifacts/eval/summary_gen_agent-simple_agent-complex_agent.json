@@ -1,0 +1,51 @@
+{
+ "agent": {
+  "n": 20,
+  "errors": 0,
+  "pass_rate": 0.9,
+  "pass_rate_fact": 0.857,
+  "pass_rate_analysis": 1.0,
+  "faithful_rate": null,
+  "abstain_rate": 0.1,
+  "evidence_has_gold": 0.857,
+  "avg_evidence_words": 443.15,
+  "avg_llm_calls": 4.1,
+  "avg_seconds": 39.68,
+  "routes": {
+   "simple": 16,
+   "complex": 4
+  }
+ },
+ "agent:complex": {
+  "n": 20,
+  "errors": 0,
+  "pass_rate": 0.85,
+  "pass_rate_fact": 0.857,
+  "pass_rate_analysis": 0.833,
+  "faithful_rate": null,
+  "abstain_rate": 0.1,
+  "evidence_has_gold": 0.929,
+  "avg_evidence_words": 873.95,
+  "avg_llm_calls": 7.6,
+  "avg_seconds": 66.525,
+  "routes": {
+   "complex": 20
+  }
+ },
+ "agent:simple": {
+  "n": 20,
+  "errors": 0,
+  "pass_rate": 0.85,
+  "pass_rate_fact": 0.857,
+  "pass_rate_analysis": 0.833,
+  "faithful_rate": null,
+  "abstain_rate": 0.15,
+  "evidence_has_gold": 0.857,
+  "avg_evidence_words": 280.05,
+  "avg_llm_calls": 1.45,
+  "avg_seconds": 19.61,
+  "routes": {
+   "simple": 20
+  }
+ }
+}

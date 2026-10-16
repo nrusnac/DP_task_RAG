@@ -31,7 +31,7 @@ State: `question, task_id, route, subqs[{q, query, hyde, rounds, status, best, h
 ### CRAG ([Yan et al., 2024](https://arxiv.org/abs/2401.15884))
 | Verdict | Our condition | Action |
 |---|---|---|
-| correct | best rerank score ≥ τ_high | knowledge refinement: sentence/row strips scored by the reranker, keep ≥ τ_strip, recompose in document order |
+| correct | best rerank score ≥ τ_high | knowledge refinement: hits ≥ τ_high are kept **whole** (up to 3); other hits are split into sentence/row strips scored by the reranker, kept if ≥ τ_strip, recomposed in document order |
 | ambiguous | τ_low ≤ best < τ_high, and Haiku judges ≥ 1 of the top 5 relevant | refine the relevant hits **and** one corrective retrieval; merge |
 | incorrect | best < τ_low, or Haiku judges none relevant | rewrite (BM25 keywords + HyDE) and retrieve again; after 2 rounds, mark **insufficient** and abstain on that sub-question |
 

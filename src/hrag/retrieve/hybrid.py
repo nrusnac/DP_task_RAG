@@ -129,13 +129,22 @@ class HybridRetriever:
     # ------------------------------------------------------------------ CRAG knowledge refinement
     _SPLIT = re.compile(r"(?<=[.;!?])\s+(?=[A-Z(\[\"'])|\n+")
 
-    def strips(self, query: str, hits: list[Hit], threshold: float | None = None, max_strips: int | None = None):
+    def strips(self, query: str, hits: list[Hit], threshold: float | None = None, max_strips: int | None = None,
+               keep_whole_above: float | None = None, max_whole: int = 3):
         """Decompose hits into sentence/row strips, score each with the reranker, keep the relevant ones in document
-        order. Table rows keep the table's header row so numbers stay interpretable."""
+        order. Table rows keep the table's header row so numbers stay interpretable.
+
+        Hits scored >= keep_whole_above (clearly relevant) are kept WHOLE (at most max_whole of them): the eval showed
+        that strip-level pruning shreds lists, enumerations and clause text whose individual items don't look relevant
+        on their own (all 4 agent failures had the gold chunk retrieved, then pruned to 30-475 words)."""
         threshold = self.cfg.strip_threshold if threshold is None else threshold
         max_strips = max_strips or self.cfg.strips_per_subq
+        whole = [h for h in hits if keep_whole_above is not None and h.score >= keep_whole_above][:max_whole]
+        whole_ids = {h.chunk_id for h in whole}
+        kept_whole = [dict(chunk_id=h.chunk_id, doc=h.doc_label(), text=h.meta["chunk_text"], score=h.score)
+                      for h in whole]
         cand = []  # (hit_rank, position, strip_text, hit)
-        for r, h in enumerate(hits):
+        for r, h in enumerate(h for h in hits if h.chunk_id not in whole_ids):
             body = h.meta["chunk_text"]
             if body.lstrip().startswith("|"):  # markdown table: strip = header + one row
                 lines = [l for l in body.split("\n") if l.strip()]
@@ -146,7 +155,7 @@ class HybridRetriever:
                 pieces = [p.strip() for p in self._SPLIT.split(body) if len(p.split()) >= 4]
             cand += [(r, j, p, h) for j, p in enumerate(pieces)]
         if not cand:
-            return []
+            return kept_whole
         with tracing.span("crag.refine", kind="RERANKER", **{"input.value": query, "n_strips": len(cand)}) as sp:
             # a strip loses its context just like a chunk does ("| Post-Merger HHI | 3,552 |" alone doesn't say which
             # market), so it is scored together with its document title and section path
@@ -154,12 +163,12 @@ class HybridRetriever:
                 query, [f"{c[3].meta['doc_title']} › {c[3].meta.get('section') or ''}:\n{c[2]}" for c in cand],
                 batch_size=64)
             keep = [(float(s), c) for s, c in zip(scores, cand) if s >= threshold]
-            if not keep:  # always keep the single best strip of the best hit
+            if not keep and not kept_whole:  # always keep the single best strip of the best hit
                 best = int(np.argmax(scores)); keep = [(float(scores[best]), cand[best])]
             keep = sorted(keep, key=lambda x: -x[0])[:max_strips]
             keep.sort(key=lambda x: (x[1][3].meta["doc_id"], x[1][3].idx, x[1][1]))  # document order
-            out = [dict(chunk_id=c[3].chunk_id, doc=c[3].doc_label(), text=c[2], score=s) for s, c in keep]
-            tracing.set_attrs(sp, **{"n_kept": len(out),
+            out = kept_whole + [dict(chunk_id=c[3].chunk_id, doc=c[3].doc_label(), text=c[2], score=s) for s, c in keep]
+            tracing.set_attrs(sp, **{"n_kept": len(out), "n_whole": len(kept_whole),
                                      "tokens_in": sum(len(c[2].split()) for c in cand),
                                      "tokens_kept": sum(len(o["text"].split()) for o in out)})
             return out

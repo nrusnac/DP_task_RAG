@@ -38,10 +38,20 @@ def render() -> str:
         s = json.loads(p.read_text())
         rows = [dict(v, _name=f"`{k}`", routes=", ".join(f"{a}:{b}" for a, b in (v.get("routes") or {}).items()))
                 for k, v in s.items()]
-        parts.append(f"**Generation** (`{p.stem.replace('summary_gen_', '')}`; Harvey rubric judge = Claude Sonnet)\n\n"
+        label = {"naive_single_shot_agent": "Colab T4, `ctx` index, 30 questions",
+                 "agent-simple_agent-complex_agent": "Adaptive-RAG ablation, Colab T4, `ctx` index, 20 questions",
+                 "after_fix_header_local": "after the refinement fix, local re-run, `header` index, same 30 questions"
+                 }.get(p.stem.replace("summary_gen_", ""), p.stem.replace("summary_gen_", ""))
+        parts.append(f"**Generation** ({label}; Harvey rubric judge = Claude Sonnet)\n\n"
                      + _table(rows, ["n", "pass_rate", "pass_rate_fact", "pass_rate_analysis", "faithful_rate",
                                      "abstain_rate", "evidence_has_gold", "avg_evidence_words", "avg_llm_calls",
                                      "avg_seconds", "routes"], "system"))
+    for p in sorted(EV.glob("summary_unanswerable_*.json")):
+        s = json.loads(p.read_text())
+        rows = [dict(v, _name=f"`{k}`") for k, v in s.items()]
+        parts.append(f"**Unanswerable questions** (`{p.stem.replace('summary_unanswerable_', '')}` index; each question asked "
+                     "in ANOTHER matter's data room; judged by Claude Haiku: did the answer decline?)\n\n"
+                     + _table(rows, ["n", "declined_rate", "hallucination_rate", "avg_llm_calls"], "system"))
     return "\n\n".join(parts) or "*No results yet.*"
 
 

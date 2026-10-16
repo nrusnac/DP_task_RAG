@@ -174,7 +174,7 @@ async def refine(state: State) -> dict:
     for s in subqs:
         st = s["status"]
         if st in ("correct", "ambiguous") and s.get("keep"):
-            new = R.strips(s["q"], s["keep"])
+            new = R.strips(s["q"], s["keep"], keep_whole_above=CFG.crag_high)
             seen = {(x["chunk_id"], x["text"]) for x in s["strips"]}
             s["strips"] = s["strips"] + [x for x in new if (x["chunk_id"], x["text"]) not in seen]
         can_retry = s["rounds"] < CFG.max_corrective_rounds

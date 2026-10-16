@@ -131,14 +131,15 @@ async def _run_system(system: str, it: dict, variant: str) -> dict:
 
 
 async def generation(n: int = 40, systems=("single_shot", "agent"), seed: int = 3, variant: str | None = None,
-                     concurrency: int = 3, judge_faith: bool = True) -> dict:
+                     concurrency: int = 3, judge_faith: bool = True, qids: list[str] | None = None,
+                     tag: str | None = None) -> dict:
     from .judge import judge_correctness, judge_faithfulness
     variant = variant or available_variants()[-1]
     items = load_qa()
     random.Random(seed).shuffle(items)
-    items = items[:n]
+    items = [i for i in items if i["qid"] in set(qids)] if qids else items[:n]
     sem = asyncio.Semaphore(concurrency)
-    out_path = EVAL_DIR / f"gen_{'_'.join(s.replace(':', '-') for s in systems)}.jsonl"
+    out_path = EVAL_DIR / f"gen_{tag or '_'.join(s.replace(':', '-') for s in systems)}.jsonl"
     records = []
 
     async def one(it, system):
@@ -178,6 +179,60 @@ async def generation(n: int = 40, systems=("single_shot", "agent"), seed: int = 
     return summary
 
 
+UNANSWERABLE_JUDGE = """The question below was asked against a legal matter's data room that does NOT contain the
+answer (it belongs to a different matter). Did the answer correctly decline, i.e. state that the documents do not
+establish the requested facts, without asserting specific facts, figures or terms as the answer?
+
+Question: {question}
+
+Answer:
+{answer}"""
+UNANSWERABLE_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["declined", "reason"],
+                       "properties": {"declined": {"type": "boolean"}, "reason": {"type": "string"}}}
+
+
+async def negatives(n: int = 12, systems=("single_shot", "agent"), seed: int = 21, variant: str | None = None,
+                    concurrency: int = 4) -> dict:
+    """Unanswerable questions: each QA question is asked against ANOTHER matter's data room. A correct system declines;
+    an incorrect one answers from look-alike evidence (a hallucination with citations)."""
+    from ..agent.graph import _matters
+    variant = variant or available_variants()[-1]
+    rng = random.Random(seed)
+    items = [i for i in load_qa() if i["gold"]]
+    rng.shuffle(items)
+    tasks = sorted(_matters())
+    items = [dict(i, task_id=rng.choice([t for t in tasks if t != i["task_id"]])) for i in items[:n]]
+    sem, recs = asyncio.Semaphore(concurrency), []
+
+    async def one(it, system):
+        async with sem:
+            try:
+                res = await _run_system(system, it, variant)
+                j = await llm.complete(UNANSWERABLE_JUDGE.format(question=it["question"], answer=res["answer"]),
+                                       model=CFG.fast_llm, schema=UNANSWERABLE_SCHEMA, purpose="judge_unanswerable")
+                recs.append(dict(qid=it["qid"], asked_in=it["task_id"], system=system, declined=bool(j["declined"]),
+                                 reason=j["reason"], llm_calls=res.get("llm_calls"), route=res.get("route"),
+                                 log=res.get("log"), answer=res["answer"]))
+            except Exception as e:  # noqa: BLE001
+                recs.append(dict(qid=it["qid"], system=system, error=repr(e)[:300]))
+            print(f"[{len(recs)}/{len(items) * len(systems)}] {system} -> {recs[-1].get('declined', recs[-1].get('error'))}",
+                  flush=True)
+
+    await asyncio.gather(*[one(it, s) for it in items for s in systems])
+    out = {s: dict(n=sum(r["system"] == s and "error" not in r for r in recs),
+                   declined_rate=round(float(np.mean([r["declined"] for r in recs if r["system"] == s and "error" not in r])), 3),
+                   hallucination_rate=round(1 - float(np.mean([r["declined"] for r in recs if r["system"] == s and "error" not in r])), 3),
+                   avg_llm_calls=round(float(np.mean([r["llm_calls"] for r in recs if r["system"] == s and r.get("llm_calls") is not None])), 2))
+           for s in systems}
+    EVAL_DIR.mkdir(parents=True, exist_ok=True)
+    with open(EVAL_DIR / f"unanswerable_{variant}.jsonl", "w") as f:
+        for r in recs:
+            f.write(json.dumps(r, default=str) + "\n")
+    (EVAL_DIR / f"summary_unanswerable_{variant}.json").write_text(json.dumps(out, indent=1))
+    print(json.dumps(out, indent=1))
+    return out
+
+
 def summarize_generation(records: list[dict]) -> dict:
     out = {}
     for system in sorted({r["system"] for r in records}):
@@ -202,7 +257,7 @@ def summarize_generation(records: list[dict]) -> dict:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("what", choices=["retrieval", "calibrate", "generation"])
+    ap.add_argument("what", choices=["retrieval", "calibrate", "generation", "negatives"])
     ap.add_argument("--n", type=int, default=40)
     ap.add_argument("--systems", nargs="+", default=["single_shot", "agent"])
     ap.add_argument("--variant", default=None)
@@ -212,6 +267,8 @@ if __name__ == "__main__":
         retrieval(a.variants)
     elif a.what == "calibrate":
         calibrate(a.variant)
+    elif a.what == "negatives":
+        asyncio.run(negatives(a.n, a.systems, variant=a.variant))
     else:
         asyncio.run(generation(a.n, a.systems, variant=a.variant))
     print("llm:", llm.STATS.snapshot())
