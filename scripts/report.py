@@ -34,15 +34,19 @@ def render() -> str:
                      f"(positives) vs. the same questions asked against another matter's data room (negatives). "
                      f"Suggested thresholds `{cal['suggested']}`; coverage `{cal['coverage']}`\n\n"
                      + _table(rows, ["positives", "gold_retrieved", "negatives"], "top rerank score"))
-    for p in sorted(EV.glob("summary_gen_*.json")):
-        s = json.loads(p.read_text())
+    labels = {  # display order: final results first, then the history that led to them
+        "naive_single_shot_agent": "**final**, Colab T4, `ctx` index, 30 questions, after the refinement fix",
+        "agent-simple_agent-complex_agent": "**final** Adaptive-RAG ablation, Colab T4, `ctx` index, 20 questions, after the fix",
+        "before_fix_ctx": "first Colab run, BEFORE the refinement fix, same 30 questions",
+        "ablation_before_fix_ctx": "first Colab Adaptive-RAG ablation, BEFORE the fix, same 20 questions",
+        "after_fix_header_local": "targeted local check of the fix, `header` index, 4 failed + 6 passed questions",
+    }
+    found = {p.stem.replace("summary_gen_", ""): p for p in EV.glob("summary_gen_*.json")}
+    for key in [k for k in labels if k in found] + sorted(k for k in found if k not in labels):
+        s = json.loads(found[key].read_text())
         rows = [dict(v, _name=f"`{k}`", routes=", ".join(f"{a}:{b}" for a, b in (v.get("routes") or {}).items()))
                 for k, v in s.items()]
-        label = {"naive_single_shot_agent": "Colab T4, `ctx` index, 30 questions",
-                 "agent-simple_agent-complex_agent": "Adaptive-RAG ablation, Colab T4, `ctx` index, 20 questions",
-                 "after_fix_header_local": "after the refinement fix, local re-run, `header` index, same 30 questions"
-                 }.get(p.stem.replace("summary_gen_", ""), p.stem.replace("summary_gen_", ""))
-        parts.append(f"**Generation** ({label}; Harvey rubric judge = Claude Sonnet)\n\n"
+        parts.append(f"**Generation** ({labels.get(key, key)}; Harvey rubric judge = Claude Sonnet)\n\n"
                      + _table(rows, ["n", "pass_rate", "pass_rate_fact", "pass_rate_analysis", "faithful_rate",
                                      "abstain_rate", "evidence_has_gold", "avg_evidence_words", "avg_llm_calls",
                                      "avg_seconds", "routes"], "system"))

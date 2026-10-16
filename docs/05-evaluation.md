@@ -89,13 +89,31 @@ Run on a Colab T4 with `notebooks/02_demo_and_eval.ipynb`. The JSON outputs are 
 | [0.95,0.99) | 12 | 0.92 | 0 |
 | [0.99,1.00) | 38 | 0.92 | 0 |
 
-**Generation** (after the refinement fix, local re-run, `header` index, same 30 questions; Harvey rubric judge = Claude Sonnet)
+**Generation** (**final**, Colab T4, `ctx` index, 30 questions, after the refinement fix; Harvey rubric judge = Claude Sonnet)
 
 | system | n | pass_rate | pass_rate_fact | pass_rate_analysis | faithful_rate | abstain_rate | evidence_has_gold | avg_evidence_words | avg_llm_calls | avg_seconds | routes |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| `agent` | 10 | 0.9 | 0.8 | 1.0 | 0.5 | 0.0 | 0.714 | 871.1 | 4.3 | 138.96 | complex:2, simple:8 |
+| `agent` | 30 | 0.967 | 0.95 | 1.0 | 0.5 | 0.067 | 0.944 | 1201.0 | 3.733 | 28.37 | simple:24, complex:6 |
+| `naive` | 30 | 0.9 | 0.95 | 0.8 | 0.7 | 0.1 | 0.944 | 1978.267 | 1.0 | 11.407 | fixed:30 |
+| `single_shot` | 30 | 0.933 | 0.95 | 0.9 | 0.633 | 0.067 | 0.889 | 2226.733 | 1.0 | 12.747 | fixed:30 |
 
-**Generation** (Adaptive-RAG ablation, Colab T4, `ctx` index, 20 questions; Harvey rubric judge = Claude Sonnet)
+**Generation** (**final** Adaptive-RAG ablation, Colab T4, `ctx` index, 20 questions, after the fix; Harvey rubric judge = Claude Sonnet)
+
+| system | n | pass_rate | pass_rate_fact | pass_rate_analysis | faithful_rate | abstain_rate | evidence_has_gold | avg_evidence_words | avg_llm_calls | avg_seconds | routes |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `agent` | 20 | 0.9 | 0.929 | 0.833 |  | 0.0 | 0.857 | 1165.25 | 3.45 | 34.59 | simple:16, complex:4 |
+| `agent:complex` | 20 | 0.9 | 0.929 | 0.833 |  | 0.0 | 1.0 | 2235.15 | 6.6 | 52.725 | complex:20 |
+| `agent:simple` | 20 | 0.9 | 0.929 | 0.833 |  | 0.0 | 0.929 | 809.15 | 1.45 | 18.62 | simple:20 |
+
+**Generation** (first Colab run, BEFORE the refinement fix, same 30 questions; Harvey rubric judge = Claude Sonnet)
+
+| system | n | pass_rate | pass_rate_fact | pass_rate_analysis | faithful_rate | abstain_rate | evidence_has_gold | avg_evidence_words | avg_llm_calls | avg_seconds | routes |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `agent` | 30 | 0.867 | 0.85 | 0.9 | 0.7 | 0.167 | 0.889 | 335.967 | 3.133 | 24.147 | simple:27, complex:3 |
+| `naive` | 30 | 0.9 | 0.95 | 0.8 | 0.633 | 0.1 | 0.944 | 1978.267 | 1.0 | 11.153 | fixed:30 |
+| `single_shot` | 30 | 0.967 | 0.95 | 1.0 | 0.667 | 0.1 | 0.889 | 2226.733 | 1.0 | 12.543 | fixed:30 |
+
+**Generation** (first Colab Adaptive-RAG ablation, BEFORE the fix, same 20 questions; Harvey rubric judge = Claude Sonnet)
 
 | system | n | pass_rate | pass_rate_fact | pass_rate_analysis | faithful_rate | abstain_rate | evidence_has_gold | avg_evidence_words | avg_llm_calls | avg_seconds | routes |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -103,13 +121,11 @@ Run on a Colab T4 with `notebooks/02_demo_and_eval.ipynb`. The JSON outputs are 
 | `agent:complex` | 20 | 0.85 | 0.857 | 0.833 |  | 0.1 | 0.929 | 873.95 | 7.6 | 66.525 | complex:20 |
 | `agent:simple` | 20 | 0.85 | 0.857 | 0.833 |  | 0.15 | 0.857 | 280.05 | 1.45 | 19.61 | simple:20 |
 
-**Generation** (Colab T4, `ctx` index, 30 questions; Harvey rubric judge = Claude Sonnet)
+**Generation** (targeted local check of the fix, `header` index, 4 failed + 6 passed questions; Harvey rubric judge = Claude Sonnet)
 
 | system | n | pass_rate | pass_rate_fact | pass_rate_analysis | faithful_rate | abstain_rate | evidence_has_gold | avg_evidence_words | avg_llm_calls | avg_seconds | routes |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| `agent` | 30 | 0.867 | 0.85 | 0.9 | 0.7 | 0.167 | 0.889 | 335.967 | 3.133 | 24.147 | simple:27, complex:3 |
-| `naive` | 30 | 0.9 | 0.95 | 0.8 | 0.633 | 0.1 | 0.944 | 1978.267 | 1.0 | 11.153 | fixed:30 |
-| `single_shot` | 30 | 0.967 | 0.95 | 1.0 | 0.667 | 0.1 | 0.889 | 2226.733 | 1.0 | 12.543 | fixed:30 |
+| `agent` | 10 | 0.9 | 0.8 | 1.0 | 0.5 | 0.0 | 0.714 | 871.1 | 4.3 | 138.96 | complex:2, simple:8 |
 
 **Unanswerable questions** (`header` index; each question asked in ANOTHER matter's data room; judged by Claude Haiku: did the answer decline?)
 
@@ -134,23 +150,31 @@ Run on a Colab T4 with `notebooks/02_demo_and_eval.ipynb`. The JSON outputs are 
 
 **CRAG calibration on the `ctx` index** gave τ_high 0.95 / τ_low 0.09. The error-free-band rule is sensitive to single outliers (one negative scored 0.95, one positive 0.09), so the ambiguous band was wide and Haiku graded more often (90 `crag_grade` calls). A percentile rule (e.g. 5th/95th) would be more robust; that's the next step.
 
-**Generation (30 questions, Colab, `ctx` index)**
+**Generation, first Colab run (before the fix; 30 questions, `ctx` index)**
 - Pass rates: naive **0.90**, single-shot **0.967**, agent **0.867**.
-- Paired view (agent vs. single-shot): 26 both pass, **3 fail only for the agent**, 1 both fail. An exact McNemar test on 3 vs. 0 discordant pairs gives p = 0.25, so this isn't significant, but it is a real pattern, explained next.
-- **Root cause of every agent failure:** the gold chunk *was* retrieved and CRAG graded it `correct` (0.98–1.00). Then **knowledge refinement pruned it to 30–475 words**. The failing questions were "list all 25 custodians", "each change the DOJ made" and clause text. In lists, enumerations and clauses, individual sentences don't look relevant on their own, so strip-level scoring drops them, and the generator then honestly says "the documents do not establish…". This is the cost of choosing refinement over parent-child ([07](07-decision-log.md) #7), and the eval shows exactly where it bites.
-- **Fix:** hits scored ≥ τ_high (clearly relevant) are passed **whole**; only marginal hits are strip-filtered. CRAG's goal is to drop *noise*, not to shred clearly relevant evidence. The re-run is below.
-- **What the agent buys even on answerable questions:**
-  - **−85% evidence** (336 vs. 2,227 words per answer)
-  - the highest faithfulness (0.70 vs. 0.667 single-shot, 0.633 naive)
-  - at 3.1 LLM calls and 24 s per question vs. 1 call and 12.5 s
+- Paired (agent vs. single-shot): 26 both pass, **3 fail only for the agent**, 1 both fail (McNemar p = 0.25).
+- **Root cause of 3 of the 4 agent failures:** the gold chunk *was* retrieved and CRAG graded it `correct` (0.98–1.00). Then **knowledge refinement pruned it to 73–475 words**. (The 4th, C-100, was pruned too, but its deeper cause is a chunking miss shared by all systems; see below.) These were list, enumeration and clause questions ("each change the DOJ made", the carve-out text), where individual sentences don't look relevant on their own. This is the cost of choosing refinement over parent-child ([07](07-decision-log.md) #7).
+- **Fix:** hits scored ≥ τ_high (clearly relevant) are passed **whole**; only marginal hits are strip-filtered. A targeted local check (`header` index, the 4 failed + 6 passed questions) predicted that 3 of the 4 would flip with no regressions.
 
-**Adaptive-RAG (20 questions):** adaptive **0.90 at 4.1 calls / 40 s**, vs. always-complex 0.85 at 7.6 calls / 67 s and always-simple 0.85 at 1.45 calls / 20 s. The router sent 16/20 questions down the simple path. Adaptive matched or beat both fixed policies at about half the cost of always-complex. (n = 20, so one question is 5 points.)
+**Generation, final Colab run (after the fix; same 30 questions, `ctx` index)**
+- Pass rates: **agent 0.967 (29/30)**, single-shot 0.933 (28/30), naive 0.90 (27/30).
+- **The fix did exactly what the diagnosis predicted.** The 3 over-pruned questions (C-016, C-005, C-046) flipped from fail to pass, and none of the agent's other passes regressed.
+- Paired (agent vs. single-shot): 28 both pass, 1 passes only for the agent, 1 both fail (McNemar p = 1.0). **Statistically a tie.**
+- **Run-to-run noise, measured:** with unchanged code, single-shot flipped one question (C-046, pass → fail), and the faithfulness of naive / single-shot moved by about ±7 points (0.633 → 0.70 and 0.667 → 0.633). So one question of pass rate, or a few points of faithfulness, is within noise at n = 30.
+- **The remaining failure (C-100, "list all 25 custodians") fails for all three systems, and it is a chunking issue.**
+  - The 25 names *are* in the data room, in three appendix tables (Appendix A/B/C).
+  - Each table became its own chunk, starting with `| No. | Full Name | Title |…` under the section path "APPENDIX A". The word "custodians" lives only in the caption paragraph just before each table, which went into a separate chunk.
+  - The tables rank 20th–30th or lower, outside the top-8. The LLM context lines ("Appendix A – Wave 1 Custodians") didn't lift them enough.
+  - **Next step:** attach a table's caption to the table chunk, and for "list all" questions retrieve the whole section.
+- **What the fix cost:**
+  - Evidence per answer rose from 336 to **1,201 words** (still **−46%** vs. single-shot's 2,227).
+  - The agent's faithfulness fell from 0.70 to **0.50**, more than the measured noise. With whole chunks the generator writes longer answers with more unlabelled characterisations (e.g. "It is a legend, not an access control"). Correctness was bought with some faithfulness. A claim-verification node, or stricter "Analysis:" labelling, is the next step.
+  - **3.7 LLM calls and 28 s** per question, vs. 1 call and 13 s.
 
-**After the refinement fix** (targeted local re-run on the `header` index: the 4 failed questions + 6 previously passed ones):
-- **3 of 4 failures now pass, with no regressions** (6/6 still pass), so 9/10 overall.
-- Evidence per answer is 871 words, still −61% vs. single-shot.
-- The remaining failure is "list all 25 custodians": the list spans more chunks than are kept whole, a real limit for exhaustive enumerations.
-- Applied to the 30-question set, the agent would score about **29/30, on par with single-shot**. This is a projection, not a full re-run, and the index variant differs.
+**Adaptive-RAG**
+- **Final run (20 questions): all three policies score 0.90.** Adaptive costs **3.45 calls / 35 s**, vs. always-complex 6.6 / 53 s and always-simple 1.45 / 19 s.
+- In the first run adaptive led 0.90 vs. 0.85 / 0.85. That one-question edge did **not** reproduce, so it was noise.
+- On this set the router sends ~80% of questions down the simple path. **Always-simple is the cheapest at equal accuracy.** Adaptive halves the cost of always-complex, but its accuracy value would need genuinely multi-hop questions to show.
 
 **Unanswerable questions** (12 questions, each asked in another matter's data room; `header` index, local):
 - Single-shot declined **11/12**; the agent declined **10/12** at 7.4 vs. 1 LLM calls.
@@ -159,13 +183,16 @@ Run on a Colab T4 with `notebooks/02_demo_and_eval.ipynb`. The JSON outputs are 
   2. **CRAG's corrective loop cuts both ways.** Rewrite + HyDE *searches harder* and can surface look-alike evidence from the wrong data room (e.g. another matter's IT memo on employees' personal devices), which the generator then answers from.
 
   A stricter grader on corrective rounds, or abstaining when only rewritten queries find evidence, would be the next step.
+- The `ctx` rerun of this test **hit the Claude subscription's session limit** ("You've hit your session limit"): 18 of 24 runs errored. It is excluded from the tables, and the raw records are kept as `unanswerable_ctx_INCOMPLETE_session_limit.jsonl`. Operational lesson: at ~700 calls per full eval session, subscription quota is a real constraint, which is what the API-key fallback is for.
 
-**Conclusion.** With a strong generator and a grounded prompt, a well-built **single-shot advanced pipeline** (structure-aware chunks, hybrid + RRF, cross-encoder rerank, data-room scoping) is already near the ceiling on this benchmark's fact-and-analysis questions. In our measurements the agentic layer did **not** improve accuracy. What it did deliver:
-- **Efficiency:** 61–85% less context per answer; adaptive routing at half the cost of always-complex with equal or better accuracy.
-- **Auditability:** every route, CRAG verdict and rewrite is logged and traced.
-- **A diagnosable structure:** each failure was attributable to one node (refinement over-pruning; corrective search finding look-alikes) and fixable there.
-
-For the 15-minute defense, this is the honest result: the agent is justified by control, cost and transparency, while the accuracy wins came from the retrieval techniques underneath it.
+**Conclusion**
+- After a fix that the per-node traces pointed to, **the agent is the best-scoring system (29/30 vs. 28/30 vs. 27/30)**, but the gaps are within measured run-to-run noise. The honest claim is **"at least on par"**, not "better".
+- **What the agentic layer adds:**
+  - **Efficiency:** 46% less context than single-shot (85% before the fix); adaptive routing at half the cost of always-complex.
+  - **Auditability:** every route, CRAG verdict and rewrite is logged and traced.
+  - **A diagnosable structure:** each failure traced to one node (refinement over-pruning; corrective search finding look-alikes; table/caption chunking). The over-pruning fix was predicted from the traces and confirmed question by question on Colab.
+- **What it costs:** ~3.7× the LLM calls, ~2× the latency, and in its current form lower faithfulness.
+- **The accuracy foundation is the retrieval stack** (structure-aware chunks, hybrid + RRF, rerank, data-room scoping): even naive dense RAG scores 0.90 with this generator.
 
 ## Findings that changed the design
 - **The silver labels favour BM25 by construction.** A chunk is gold *because* it contains the verbatim key facts, which is exactly what BM25 matches. So BM25's strong showing within a matter is partly a labelling artefact. Hybrid search is the safer default: it never loses much to the best single retriever and wins on Recall@5.
@@ -177,3 +204,5 @@ For the 15-minute defense, this is the honest result: the agent is justified by 
 - One judge model (Claude), not Harvey's dual-judge profile (Claude + GPT), and our answers are short QA answers rather than full memos. Criteria written for memos are judged "in substance" for the question asked.
 - The sample is small (tens of questions), so differences of a few points are noise.
 - The CRAG thresholds are calibrated on the same questions used in the generation eval. It's only two parameters, so overfitting risk is low, but it is disclosed here.
+- **No held-out set for the fix.** The refinement fix was chosen after inspecting the first run's failures and confirmed on the same 30 questions. It targets a mechanism (don't shred chunks scored ≥ τ_high), not specific questions, but a fresh question sample would be the clean confirmation.
+- **Run-to-run noise** (measured on unchanged pipelines): about ±1 question of pass rate and about ±7 points of faithfulness at n = 30.

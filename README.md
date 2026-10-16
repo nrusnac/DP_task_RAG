@@ -50,13 +50,14 @@ All design choices, with alternatives and measurements: [docs/07-decision-log.md
 - **Scoping to the matter's data room matters:** corpus-wide dense search puts ~17% of top-5 hits in *other* matters; hybrid + rerank cuts that to ~7%, and scoping to 0.
 - **Contextual Retrieval didn't measurably help on this eval.** The labels are verbatim-fact matches, a matter has only ~186 chunks, and the cheap deterministic header already gives most of the context. Reported as is.
 - **CRAG thresholds are measured with cross-matter negatives:** the top rerank score almost perfectly separates answerable from unanswerable questions (`ctx`: negatives median 0.011, positives p10 0.94). The error-free-band rule is outlier-sensitive (`ctx` τ 0.09 / 0.95, so 20% of retrievals are LLM-graded).
-- **Generation on answerable questions** (30 questions): single-shot advanced RAG 0.967, naive 0.90, agent 0.867.
-  - Every agent failure was **over-pruning by CRAG refinement** on list, enumeration and clause questions, with the gold chunk retrieved and graded correct. Fixed by passing clearly relevant hits whole.
-  - The agent uses **85% less evidence** and has the highest faithfulness.
-- **Adaptive-RAG:** 0.90 at 4.1 calls, vs. always-complex 0.85 at 7.6 calls and always-simple 0.85 at 1.45 calls.
-- **After fixing over-pruning:** 3 of the 4 failures pass with no regressions (targeted re-run), projecting to about 29/30, on par with single-shot.
-- **Unanswerable questions** (asked in the wrong matter's data room): single-shot declined 11/12, the agent 10/12. **Not better.** The grounded generator prompt does most of the declining, and CRAG's corrective search can surface look-alike evidence.
-- **Bottom line:** the accuracy came from the retrieval techniques (hybrid, rerank, scoping). The agent adds control, cost savings (less context, adaptive routing) and auditability, not accuracy, on this benchmark.
+- **Generation (final Colab run, 30 questions): agent 0.967, single-shot 0.933, naive 0.90.** That's a statistical tie: paired McNemar p = 1.0, and single-shot itself moved by one question between identical runs.
+  - The first run had the agent at 0.867. 3 of its 4 failures were **CRAG refinement over-pruning** list, enumeration and clause content, with the gold chunk retrieved and graded correct. The 4th is the chunking miss below.
+  - The fix (pass clearly relevant hits whole) **flipped exactly the 3 predicted questions to pass, with no regressions**.
+  - Cost: 3.7 LLM calls vs. 1, and 46% less context than single-shot. Faithfulness fell after the fix (0.70 → 0.50).
+- **The one question every system fails** ("list all 25 custodians") is a **chunking issue**: each appendix table was split from the caption that says "custodians".
+- **Adaptive-RAG (final, 20 questions):** all policies score 0.90. Adaptive costs 3.45 calls vs. 6.6 for always-complex and 1.45 for always-simple. Its earlier one-question edge didn't reproduce.
+- **Unanswerable questions** (asked in the wrong matter's data room): single-shot declined 11/12, the agent 10/12. **Not better.** The grounded prompt does most of the declining, and CRAG's corrective search can surface look-alike evidence. A `ctx` rerun hit the Claude subscription session limit and is excluded.
+- **Bottom line:** the retrieval stack (hybrid, rerank, scoping) is the accuracy foundation. The agent is *at least on par*, at lower context but higher LLM cost. Its main value is control and auditability: every failure traced to one node, and the main fix was predicted from traces and confirmed on Colab.
 
 <!-- RESULTS:START -->
 **Retrieval** (57 questions with silver labels; searched within the matter's data room unless marked corpus-wide; `foreign@5` = share of top-5 hits from other matters)
@@ -95,13 +96,31 @@ All design choices, with alternatives and measurements: [docs/07-decision-log.md
 | [0.95,0.99) | 12 | 0.92 | 0 |
 | [0.99,1.00) | 38 | 0.92 | 0 |
 
-**Generation** (after the refinement fix, local re-run, `header` index, same 30 questions; Harvey rubric judge = Claude Sonnet)
+**Generation** (**final**, Colab T4, `ctx` index, 30 questions, after the refinement fix; Harvey rubric judge = Claude Sonnet)
 
 | system | n | pass_rate | pass_rate_fact | pass_rate_analysis | faithful_rate | abstain_rate | evidence_has_gold | avg_evidence_words | avg_llm_calls | avg_seconds | routes |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| `agent` | 10 | 0.9 | 0.8 | 1.0 | 0.5 | 0.0 | 0.714 | 871.1 | 4.3 | 138.96 | complex:2, simple:8 |
+| `agent` | 30 | 0.967 | 0.95 | 1.0 | 0.5 | 0.067 | 0.944 | 1201.0 | 3.733 | 28.37 | simple:24, complex:6 |
+| `naive` | 30 | 0.9 | 0.95 | 0.8 | 0.7 | 0.1 | 0.944 | 1978.267 | 1.0 | 11.407 | fixed:30 |
+| `single_shot` | 30 | 0.933 | 0.95 | 0.9 | 0.633 | 0.067 | 0.889 | 2226.733 | 1.0 | 12.747 | fixed:30 |
 
-**Generation** (Adaptive-RAG ablation, Colab T4, `ctx` index, 20 questions; Harvey rubric judge = Claude Sonnet)
+**Generation** (**final** Adaptive-RAG ablation, Colab T4, `ctx` index, 20 questions, after the fix; Harvey rubric judge = Claude Sonnet)
+
+| system | n | pass_rate | pass_rate_fact | pass_rate_analysis | faithful_rate | abstain_rate | evidence_has_gold | avg_evidence_words | avg_llm_calls | avg_seconds | routes |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `agent` | 20 | 0.9 | 0.929 | 0.833 |  | 0.0 | 0.857 | 1165.25 | 3.45 | 34.59 | simple:16, complex:4 |
+| `agent:complex` | 20 | 0.9 | 0.929 | 0.833 |  | 0.0 | 1.0 | 2235.15 | 6.6 | 52.725 | complex:20 |
+| `agent:simple` | 20 | 0.9 | 0.929 | 0.833 |  | 0.0 | 0.929 | 809.15 | 1.45 | 18.62 | simple:20 |
+
+**Generation** (first Colab run, BEFORE the refinement fix, same 30 questions; Harvey rubric judge = Claude Sonnet)
+
+| system | n | pass_rate | pass_rate_fact | pass_rate_analysis | faithful_rate | abstain_rate | evidence_has_gold | avg_evidence_words | avg_llm_calls | avg_seconds | routes |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `agent` | 30 | 0.867 | 0.85 | 0.9 | 0.7 | 0.167 | 0.889 | 335.967 | 3.133 | 24.147 | simple:27, complex:3 |
+| `naive` | 30 | 0.9 | 0.95 | 0.8 | 0.633 | 0.1 | 0.944 | 1978.267 | 1.0 | 11.153 | fixed:30 |
+| `single_shot` | 30 | 0.967 | 0.95 | 1.0 | 0.667 | 0.1 | 0.889 | 2226.733 | 1.0 | 12.543 | fixed:30 |
+
+**Generation** (first Colab Adaptive-RAG ablation, BEFORE the fix, same 20 questions; Harvey rubric judge = Claude Sonnet)
 
 | system | n | pass_rate | pass_rate_fact | pass_rate_analysis | faithful_rate | abstain_rate | evidence_has_gold | avg_evidence_words | avg_llm_calls | avg_seconds | routes |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -109,13 +128,11 @@ All design choices, with alternatives and measurements: [docs/07-decision-log.md
 | `agent:complex` | 20 | 0.85 | 0.857 | 0.833 |  | 0.1 | 0.929 | 873.95 | 7.6 | 66.525 | complex:20 |
 | `agent:simple` | 20 | 0.85 | 0.857 | 0.833 |  | 0.15 | 0.857 | 280.05 | 1.45 | 19.61 | simple:20 |
 
-**Generation** (Colab T4, `ctx` index, 30 questions; Harvey rubric judge = Claude Sonnet)
+**Generation** (targeted local check of the fix, `header` index, 4 failed + 6 passed questions; Harvey rubric judge = Claude Sonnet)
 
 | system | n | pass_rate | pass_rate_fact | pass_rate_analysis | faithful_rate | abstain_rate | evidence_has_gold | avg_evidence_words | avg_llm_calls | avg_seconds | routes |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| `agent` | 30 | 0.867 | 0.85 | 0.9 | 0.7 | 0.167 | 0.889 | 335.967 | 3.133 | 24.147 | simple:27, complex:3 |
-| `naive` | 30 | 0.9 | 0.95 | 0.8 | 0.633 | 0.1 | 0.944 | 1978.267 | 1.0 | 11.153 | fixed:30 |
-| `single_shot` | 30 | 0.967 | 0.95 | 1.0 | 0.667 | 0.1 | 0.889 | 2226.733 | 1.0 | 12.543 | fixed:30 |
+| `agent` | 10 | 0.9 | 0.8 | 1.0 | 0.5 | 0.0 | 0.714 | 871.1 | 4.3 | 138.96 | complex:2, simple:8 |
 
 **Unanswerable questions** (`header` index; each question asked in ANOTHER matter's data room; judged by Claude Haiku: did the answer decline?)
 
