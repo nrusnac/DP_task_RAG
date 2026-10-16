@@ -23,10 +23,12 @@ from ..config import CFG
 QA_PROMPT = """You are building an evaluation set for a retrieval system over one legal matter's data room.
 The questions must test what the SOURCE DOCUMENTS say (facts, figures, terms, positions, issues they reveal), never
 the deliverable the lawyer will write. If a criterion only grades the deliverable itself (its format, structure,
-tone, or whether it "proposes"/"drafts"/"recommends" something not stated in the sources), set kind to "skip".
+tone, citation style, length), set kind to "skip".
 For EACH rubric criterion below, write:
-- question: the question a lawyer would ask the data room to check the criterion. Self-contained (name the
-  market, party, document or issue), answerable from the documents, and it must NOT reveal the answer.
+- question: the question a lawyer would ask to satisfy the criterion. Self-contained (name the market, party,
+  document or issue) and it must NOT reveal the answer. It must ask for EVERYTHING the criterion needs to PASS:
+  if the criterion requires a recommendation, timeline or advice, the question must ask for it too
+  (e.g. "... and what negotiation timeline should CIS follow before the June 16 deadline?").
 - expected_answer: the answer implied by the criterion (1-2 sentences).
 - key_facts: 0-4 short strings that must appear VERBATIM in the source document to answer it: figures exactly as
   a document would print them (e.g. "3,552", "50.0%", "$164 million"), party names, section numbers. Use [] when the

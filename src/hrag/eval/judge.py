@@ -39,8 +39,8 @@ VERDICT_SCHEMA = {"type": "object", "additionalProperties": False, "required": [
                   "properties": {"reasoning": {"type": "string"}, "verdict": {"type": "string", "enum": ["pass", "fail"]}}}
 
 FAITHFUL_PROMPT = """Check whether the answer is grounded in the evidence. A claim is unsupported if the evidence does
-not state it (general legal background that is clearly marked as such is fine; an explicit "the documents do not
-establish X" is fine).
+not state it. Reasoning or advice explicitly labelled "Analysis:" is NOT a factual claim, and neither is general
+legal background marked as such or an explicit "the documents do not establish X".
 
 Evidence:
 {evidence}

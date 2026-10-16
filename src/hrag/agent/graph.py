@@ -218,7 +218,7 @@ async def sufficiency(state: State) -> dict:
     it = state.get("iteration", 0) + 1
     out = await llm.complete(P.SUFFICIENCY.format(question=state["question"], evidence=_evidence_by_subq(state["subqs"])),
                              system=P.SYSTEM, model=CFG.fast_llm, schema=P.SUFFICIENCY_SCHEMA, purpose="sufficiency")
-    missing = [] if out.get("sufficient") else out.get("missing", [])[:3]
+    missing = [] if out.get("sufficient") else out.get("missing", [])[:2]
     known = {s["q"].lower() for s in state["subqs"]}
     new = [_new_subq(len(state["subqs"]) + i, q) for i, q in enumerate(m for m in missing if m.lower() not in known)]
     msg = f"sufficiency iter {it}: " + ("sufficient" if not new else "missing → " + " | ".join(s["q"] for s in new))

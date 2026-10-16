@@ -153,7 +153,7 @@ async def generation(n: int = 40, systems=("single_shot", "agent"), seed: int = 
                     rec = dict(qid=it["qid"], system=system, kind=it["kind"], route=res.get("route"),
                                verdict=corr["verdict"], judge_reasoning=corr["reasoning"],
                                faithful=faith.get("faithful"), unsupported=faith.get("unsupported"),
-                               abstained=any(m in (res["answer"] or "").lower() for m in ABSTAIN_MARKERS),
+                               abstained=any(m in (res["answer"] or "")[:250].lower() for m in ABSTAIN_MARKERS),
                                evidence_hits_gold=bool(set(it["gold"]) & {e["chunk_id"] for e in res["evidence"]})
                                if it["gold"] else None,
                                cited_gold=bool(set(it["gold"]) & cited) if it["gold"] else None,

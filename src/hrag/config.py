@@ -56,7 +56,7 @@ class Config:
     strip_threshold: float = _env("STRIP_THRESHOLD", 0.50)
     strips_per_subq: int = 12
     max_corrective_rounds: int = 2
-    max_sufficiency_iters: int = 2
+    max_sufficiency_iters: int = 1
 
     # LLM concurrency (measured ~1.1 calls/s at 8-way on Colab's 2 vCPUs)
     llm_concurrency: int = _env("LLM_CONCURRENCY", 6)

@@ -7,8 +7,11 @@ ROUTER = """Classify how much retrieval this question needs (Adaptive-RAG routin
 
 - direct: answerable WITHOUT this matter's documents (greetings, questions about you, generic definitions or general
   law not tied to this matter's facts).
-- simple: needs ONE specific fact or passage from the documents (a figure, date, party, clause, single statement).
-- complex: needs SEVERAL facts from different places, comparison, aggregation, multi-step reasoning or legal analysis.
+- simple: about ONE topic that one search can cover: a figure, date, party, clause, policy or position, including
+  2-3 closely related facts and a short recommendation based on them.
+- complex: needs facts on SEVERAL distinct topics or documents that one search cannot cover, or a broad
+  synthesis (comparing markets/parties/positions, a full issues analysis or strategy across topics).
+When in doubt, choose simple.
 
 Matter: {matter}
 Question: {question}"""
@@ -54,7 +57,9 @@ REWRITE_SCHEMA = {"type": "object", "additionalProperties": False, "required": [
                   "properties": {"keywords": {"type": "string"}, "hyde": {"type": "string"}}}
 
 SUFFICIENCY = """Given the question and the evidence gathered so far (grouped by sub-question), decide whether the
-evidence is sufficient for a complete, accurate answer. If not, list up to 3 NEW sub-questions for what is missing.
+evidence is sufficient. It is sufficient unless some PART of the question is not addressed by any evidence at all
+(more detail on a part that is already covered does not count). If not, list up to 2 NEW sub-questions for the
+unaddressed parts only.
 Only ask for information that THIS MATTER'S OWN DOCUMENTS could contain (deal facts, figures, parties' statements,
 internal analyses). Never ask for current law, updated thresholds, market news or anything outside the data room;
 the answer will flag those as needing outside verification. Do not repeat earlier sub-questions. Leave the list
@@ -65,7 +70,7 @@ Question: {question}
 {evidence}"""
 SUFFICIENCY_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["sufficient", "missing"],
                       "properties": {"sufficient": {"type": "boolean"},
-                                     "missing": {"type": "array", "items": {"type": "string"}, "maxItems": 3}}}
+                                     "missing": {"type": "array", "items": {"type": "string"}, "maxItems": 2}}}
 
 GENERATE_SYSTEM = ("You are a senior antitrust associate. You answer strictly from the evidence provided from the "
                    "client's data room. Precision matters more than length.")
@@ -76,7 +81,9 @@ Rules
 - Quote figures, dates, names and section numbers exactly as written in the evidence.
 - If the evidence does not establish something the question asks, say so explicitly ("The documents provided do not
   establish ...") instead of guessing. Never present outside knowledge as coming from the documents.
-- Be concise and structured (short paragraphs or bullets).
+- Keep document facts and your own reasoning apart: facts carry citations; any legal inference, recommendation or
+  advice goes in a section or sentence starting with "Analysis:" (no citation needed there).
+- Answer exactly what is asked, concisely and structured (short paragraphs or bullets).
 {insufficient}
 Matter: {matter}
 Question: {question}

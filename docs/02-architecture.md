@@ -50,7 +50,7 @@ flowchart TD
 | `grade` | rerank scores → correct / ambiguous / incorrect | thresholds; Haiku only in the ambiguous band | CRAG retrieval evaluator |
 | `refine` | kept hits → relevant sentence or row strips | bge-reranker-v2-m3 at strip level | CRAG knowledge refinement (less noise, fewer tokens) |
 | `rewrite` | failed sub-question → BM25 keywords + HyDE passage (≤ 2 rounds) | Claude Haiku | CRAG corrective retrieval; abstain if still failing |
-| `sufficiency` | evidence per sub-question → missing sub-questions (≤ 2 iterations) | Claude Haiku | multi-hop gap filling |
+| `sufficiency` | evidence per sub-question → missing sub-questions (1 iteration) | Claude Haiku | multi-hop gap filling |
 | `generate` | numbered strips + insufficiency flags → cited answer | Claude Sonnet | grounded, checkable output |
 
 All Claude calls go through `hrag.llm.complete()`:
