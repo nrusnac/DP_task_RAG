@@ -6,7 +6,7 @@ Every parser returns (title, elements); an element is a dict:
   {"kind": "table", "rows": [[cell, ...], ...], "title": str | None}   # first row = header
   {"kind": "slide" | "email", "text": str, "title": str}
 
-Edge cases found while exploring the corpus (see RAG_CONCEPTS.md §2):
+Edge cases found while exploring the corpus (see docs/01-dataset.md):
 - docx tracked changes (w:ins / w:del) are rendered as [INSERTED: ...] / [DELETED: ...]; python-docx drops them.
 - malformed docx XML (an unescaped '&') is parsed with lxml's recover mode instead of crashing.
 - xlsx formula cells without a cached value keep their formula text instead of becoming empty.
