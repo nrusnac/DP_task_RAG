@@ -34,7 +34,8 @@ class SubQ(TypedDict, total=False):
     query: str          # current BM25/rerank query (original or rewritten keywords)
     hyde: str | None    # HyDE passage for the dense side after a corrective rewrite
     rounds: int         # corrective rounds used
-    status: str         # pending | correct | ambiguous | incorrect | retry | insufficient | done
+    status: str         # pending | correct | ambiguous | incorrect | retry | done | weak | insufficient
+                        # terminal: done (graded correct), weak (strips but never graded correct), insufficient (none)
     best: float
     hits: list
     strips: list
@@ -125,9 +126,10 @@ async def retrieve(state: State) -> dict:
     for s in subqs:
         if s["status"] != "pending":
             continue
-        hits = R.search(s["query"], task_id=state.get("task_id"), dense_query=s.get("hyde"))
+        # BM25 gets the (rewritten) keywords; the dense side and the reranker get the sub-question itself
+        hits = R.search(s["query"], task_id=state.get("task_id"), dense_query=s.get("hyde"), question=s["q"])
         s["hits"] = hits
-        s["best"] = hits[0].score if hits else 0.0
+        s["best"] = max((h.score for h in hits), default=0.0)  # with rank fusion, hits[0] isn't always the max
         s["status"] = "retrieved"
     return {"subqs": subqs}
 
@@ -155,6 +157,8 @@ async def grade(state: State) -> dict:
                                                    system=P.SYSTEM, model=CFG.fast_llm, schema=P.GRADE_SCHEMA,
                                                    purpose="crag_grade") for s in todo], return_exceptions=True)
         for s, o in zip(todo, outs):
+            if isinstance(o, llm.QuotaError):
+                raise o
             rel = [] if isinstance(o, Exception) else [i for i in o.get("relevant", []) if 1 <= i <= len(s["hits"][:5])]
             s["keep"] = [s["hits"][i - 1] for i in rel]
             s["status"] = "ambiguous" if s["keep"] else "incorrect"
@@ -166,22 +170,22 @@ async def grade(state: State) -> dict:
 
 
 async def refine(state: State) -> dict:
-    """Knowledge refinement for correct/ambiguous; decide retry vs. insufficient for the rest."""
-    R = retriever(state.get("variant", "ctx"))
+    """Knowledge refinement for correct/ambiguous; decide retry vs. a terminal status for the rest. Only a sub-question
+    graded correct in some round ends 'done'; one that runs out of rounds with only grader-kept strips ends 'weak'."""
     subqs = [dict(s) for s in state["subqs"]]
     for s in subqs:
         st = s["status"]
         if st in ("correct", "ambiguous") and s.get("keep"):
-            new = R.strips(s["q"], s["keep"], keep_whole_above=CFG.crag_high)
+            new = retriever(state.get("variant", "ctx")).strips(s["q"], s["keep"], keep_whole_above=CFG.crag_high)
             seen = {(x["chunk_id"], x["text"]) for x in s["strips"]}
             s["strips"] = s["strips"] + [x for x in new if (x["chunk_id"], x["text"]) not in seen]
         can_retry = s["rounds"] < CFG.max_corrective_rounds
         if st == "correct":
             s["status"] = "done"
         elif st == "ambiguous":
-            s["status"] = "retry" if can_retry else "done"
+            s["status"] = "retry" if can_retry else "weak"
         elif st == "incorrect":
-            s["status"] = "retry" if can_retry else ("done" if s["strips"] else "insufficient")
+            s["status"] = "retry" if can_retry else ("weak" if s["strips"] else "insufficient")
     return {"subqs": subqs}
 
 
@@ -195,9 +199,11 @@ async def rewrite(state: State) -> dict:
         return_exceptions=True)
     log = list(state.get("log") or [])
     for s, o in zip(todo, outs):
+        if isinstance(o, llm.QuotaError):
+            raise o
         s["rounds"] += 1
         if isinstance(o, Exception):
-            s["status"] = "done" if s["strips"] else "insufficient"
+            s["status"] = "weak" if s["strips"] else "insufficient"
             continue
         s["query"], s["hyde"], s["status"] = o["keywords"], o["hyde"], "pending"
         log.append(f"rewrite[{s['id']}] round {s['rounds']}: '{o['keywords']}' + HyDE")
@@ -223,19 +229,60 @@ async def sufficiency(state: State) -> dict:
     return {"subqs": list(state["subqs"]) + new, "iteration": it, "log": _log(state, msg)}
 
 
+def _covered(small: str, big: str) -> bool:
+    """True if every line of `small` occurs in `big` (a strip, incl. a table header + row strip, of a whole chunk)."""
+    lines = [l.strip() for l in small.split("\n") if l.strip()]
+    return bool(lines) and len(small) < len(big) and all(l in big for l in lines)
+
+
+def _select_evidence(subqs, per_subq: int | None = None, max_total: int | None = None) -> list[dict]:
+    """Evidence passed to generation: the best `per_subq` strips of each sub-question, taken round-robin up to
+    `max_total`, minus strips already contained in a selected whole chunk. Less evidence = less to over-synthesize:
+    the agent's unfaithful answers came with ~1.7x the evidence of its faithful ones (13.5 vs 9.1 items). Grouped by
+    sub-question, each group in document order."""
+    per_subq = per_subq or CFG.gen_strips_per_subq
+    max_total = max_total or CFG.gen_max_evidence
+    queues = []
+    for si, s in enumerate(subqs):
+        ranked = sorted(enumerate(s["strips"]), key=lambda p: -p[1].get("score", 0.0))[:per_subq]
+        queues.append([(si, pos, x) for pos, x in ranked])
+    picked: list[tuple[int, int, dict]] = []
+    for rnd in range(per_subq):
+        for q in queues:
+            if rnd >= len(q) or len(picked) >= max_total:
+                continue
+            si, pos, x = q[rnd]
+            same = [p for p in picked if p[2]["chunk_id"] == x["chunk_id"]]
+            if any(p[2]["text"] == x["text"] or _covered(x["text"], p[2]["text"]) for p in same):
+                continue
+            picked = [p for p in picked if not (p[2]["chunk_id"] == x["chunk_id"] and _covered(p[2]["text"], x["text"]))]
+            picked.append((si, pos, x))
+    return [x for _, _, x in sorted(picked, key=lambda p: (p[0], p[1]))]
+
+
+def abstain_answer(subqs) -> str:
+    return ("The documents provided do not establish the answer: the search of this matter's data room found no "
+            "relevant evidence for:\n" + "\n".join(f"- {s['q']}" for s in subqs))
+
+
 async def generate(state: State) -> dict:
-    evidence, index = [], {}
-    for s in state["subqs"]:
-        for x in s["strips"]:
-            key = (x["chunk_id"], x["text"])
-            if key not in index:
-                index[key] = len(evidence) + 1
-                evidence.append(x)
+    subqs = state["subqs"]
+    if subqs and all(s["status"] == "insufficient" for s in subqs):  # forced abstain: nothing to answer from
+        return {"answer": abstain_answer(subqs), "evidence": [], "citations": [],
+                "log": _log(state, "generate: all sub-questions insufficient → abstain (no LLM call)")}
+    evidence = _select_evidence(subqs)
     ev_txt = "\n\n".join(f"[{i}] ({x['doc']})\n{x['text']}" for i, x in enumerate(evidence, 1)) or "(no evidence found)"
-    insuff = [s["q"] for s in state["subqs"] if s["status"] == "insufficient"]
-    insuff_txt = ("\nThe search found NO supporting evidence for these sub-questions; state that explicitly:\n"
-                  + "\n".join(f"- {q}" for q in insuff) + "\n") if insuff else ""
-    answer = await llm.complete(P.GENERATE.format(insufficient=insuff_txt, matter=state["matter"],
+    insuff = [s["q"] for s in subqs if s["status"] == "insufficient"]
+    weak = [s["q"] for s in subqs if s["status"] == "weak"]
+    notes = ""
+    if insuff:
+        notes += ("\nThe search found NO supporting evidence for these sub-questions; state that explicitly and do not "
+                  "answer them from other evidence or background knowledge:\n" + "\n".join(f"- {q}" for q in insuff) + "\n")
+    if weak:
+        notes += ("\nFor these sub-questions the search found only INDIRECT evidence (no passage was clearly relevant): "
+                  "use it only where it directly states the answer, otherwise say the documents provided do not "
+                  "establish it:\n" + "\n".join(f"- {q}" for q in weak) + "\n")
+    answer = await llm.complete(P.GENERATE.format(insufficient=notes, matter=state["matter"],
                                                   question=state["question"], evidence=ev_txt),
                                 system=P.GENERATE_SYSTEM, model=CFG.strong_llm, purpose="generate", thinking=False)
     cited = sorted({int(n) for n in re.findall(r"\[(\d+)\]", answer or "") if 1 <= int(n) <= len(evidence)})
@@ -292,7 +339,7 @@ async def answer(question: str, task_id: str | None = None, policy: str = "adapt
     t0 = time.perf_counter()
     ctr = llm.start_counter()
     load_calibration()
-    state = State(question=question, task_id=task_id, matter=_matters().get(task_id, "whole antitrust corpus"),
+    state = State(question=question, task_id=task_id, matter=_matters().get(task_id, "whole corpus"),
                   policy=policy, variant=variant, log=[], subqs=[], iteration=0)
     with tracing.span("agent.answer", kind="AGENT", **{"input.value": question, "task_id": task_id or "corpus",
                                                        "policy": policy, "variant": variant}) as sp:

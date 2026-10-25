@@ -98,6 +98,21 @@ class LLMError(RuntimeError):
     pass
 
 
+class QuotaError(LLMError):
+    """Subscription session/usage limit or exhausted API credit: retrying can't help until the limit resets, so it
+    is raised at once and long eval runs stop scheduling work (see run_eval.generation(resume=True))."""
+
+
+# "You've hit your session limit · resets 8:50am (UTC)" (claude_agent_sdk), "Claude AI usage limit reached",
+# "Your credit balance is too low" (API). Per-minute rate limits are NOT quota errors: the normal retry handles them.
+_QUOTA_MARKERS = ("session limit", "usage limit", "weekly limit", "quota", "credit balance")
+
+
+def _is_quota(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return any(m in msg for m in _QUOTA_MARKERS)
+
+
 async def _sdk_call(prompt, system, model, schema, thinking):
     from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
 
@@ -177,6 +192,8 @@ async def complete(prompt: str, *, system: str = "You are a precise legal resear
                 except Exception as e:  # noqa: BLE001
                     STATS.add(purpose, time.perf_counter() - t0, {}, False)
                     tracing.set_attrs(sp, **{"error": repr(e)[:500]})
+                    if _is_quota(e):
+                        raise QuotaError(f"{purpose}: {e}") from e
                     last_err = e
         await asyncio.sleep(1.5 * (attempt + 1))
     raise LLMError(f"{purpose}: failed after {retries + 1} attempts: {last_err!r}")

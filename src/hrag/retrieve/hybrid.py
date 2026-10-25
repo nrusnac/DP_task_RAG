@@ -1,6 +1,6 @@
 """B3-B4 + CRAG strip scoring: scoped hybrid retrieval (BGE-M3 + BM25 -> RRF) and cross-encoder reranking.
 
-Exact dense search is a numpy matmul: at ~6k x 1024 vectors it takes ~1 ms, so an ANN index (FAISS/HNSW) would add
+Exact dense search is a numpy matmul: at ~9k x 1024 vectors it takes ~1 ms, so an ANN index (FAISS/HNSW) would add
 approximation error and a dependency for no gain. Swap in FAISS-IVF/HNSW above ~10^6 chunks.
 """
 from __future__ import annotations
@@ -92,19 +92,35 @@ class HybridRetriever:
                    dict(task_id=row.task_id, doc_id=row.doc_id, section=row.section, kind=row.kind,
                         doc_title=row.doc_title, chunk_text=row.text))
 
+    @staticmethod
+    def fuse_rerank(cands: list[Hit], scores, k: int = 60) -> list[Hit]:
+        """Order candidates by RRF of their first-stage rank (list order) and their rerank rank. Each Hit keeps its
+        rerank score: the CRAG thresholds are calibrated on that scale."""
+        for h, s in zip(cands, scores):
+            h.score = float(s)
+        by_rerank = sorted(range(len(cands)), key=lambda i: -cands[i].score)
+        fused = HybridRetriever.rrf([list(range(len(cands))), by_rerank], k)
+        return [cands[i] for i, _ in fused]
+
     def search(self, query: str, task_id: str | None = None, mode: str = "hybrid", rerank: bool = True,
-               dense_query: str | None = None, top: int | None = None, exclude: set[str] | None = None) -> list[Hit]:
-        """mode: 'dense' | 'bm25' | 'hybrid'. dense_query lets HyDE drive the dense side while BM25 uses keywords."""
+               dense_query: str | None = None, top: int | None = None, exclude: set[str] | None = None,
+               question: str | None = None, fusion: str | None = None) -> list[Hit]:
+        """mode: 'dense' | 'bm25' | 'hybrid'. After a CRAG rewrite, `query` is the BM25 keyword query, `dense_query`
+        the HyDE passage and `question` the original sub-question: HyDE and the question each get a dense vote, and
+        the reranker scores against the question, so rerank scores mean the same thing in every round.
+        fusion: 'rrf' | 'replace' (default CFG.rerank_fusion), see config."""
         top = top or self.cfg.rerank_top
+        question = question or query
+        fusion = fusion or self.cfg.rerank_fusion
         with tracing.span("retrieve.hybrid", kind="RETRIEVER", **{"input.value": query, "retrieval.mode": mode,
                                                                   "retrieval.scope": task_id or "corpus",
                                                                   "retrieval.variant": self.variant}) as sp:
             t0 = time.perf_counter()
             rankings = []
             if mode in ("dense", "hybrid"):
-                rankings.append([i for i, _ in self.dense(dense_query or query, task_id)])
-                if dense_query and dense_query != query:  # HyDE + original question both vote
-                    rankings.append([i for i, _ in self.dense(query, task_id)])
+                rankings.append([i for i, _ in self.dense(dense_query or question, task_id)])
+                if dense_query and dense_query != question:  # HyDE + original question both vote
+                    rankings.append([i for i, _ in self.dense(question, task_id)])
             if mode in ("bm25", "hybrid"):
                 rankings.append([i for i, _ in self.sparse(query, task_id)])
             fused = self.rrf(rankings, self.cfg.rrf_k) if len(rankings) > 1 else \
@@ -113,12 +129,15 @@ class HybridRetriever:
                 fused = [(i, s) for i, s in fused if self.df.chunk_id.iat[i] not in exclude]
             cands = [self.hit(i, s) for i, s in fused[:self.cfg.rerank_candidates if rerank else top]]
             if rerank and cands:
-                with tracing.span("rerank", kind="RERANKER", **{"input.value": query,
+                with tracing.span("rerank", kind="RERANKER", **{"input.value": question, "reranker.fusion": fusion,
                                                                 "reranker.model_name": self.cfg.rerank_model}) as rs:
-                    scores = models.rerank_scores(query, [h.text for h in cands])
-                    for h, s in zip(cands, scores):
-                        h.score = float(s)
-                    cands.sort(key=lambda h: -h.score)
+                    scores = models.rerank_scores(question, [h.text for h in cands])
+                    if fusion == "rrf":
+                        cands = self.fuse_rerank(cands, scores, self.cfg.rrf_k)
+                    else:
+                        for h, s in zip(cands, scores):
+                            h.score = float(s)
+                        cands.sort(key=lambda h: -h.score)
                     tracing.set_documents(rs, [dict(id=h.chunk_id, content=h.text, score=h.score)
                                                for h in cands[:top]], prefix="reranker.output_documents")
             hits = cands[:top]
