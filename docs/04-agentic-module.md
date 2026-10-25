@@ -35,10 +35,26 @@ State: `question, task_id, route, subqs[{q, query, hyde, rounds, status, best, h
 | ambiguous | τ_low ≤ best < τ_high, and Haiku judges ≥ 1 of the top 5 relevant | refine the relevant hits **and** one corrective retrieval; merge |
 | incorrect | best < τ_low, or Haiku judges none relevant | rewrite (BM25 keywords + HyDE) and retrieve again; after 2 rounds, mark **insufficient** and abstain on that sub-question |
 
+**Terminal statuses** (this branch). Only a sub-question graded *correct* in some round ends **done**. One that runs
+out of corrective rounds with only grader-kept strips ends **weak**: generation is told its evidence is indirect and
+may be used only where it states the answer directly. One with no strips ends **insufficient**. When *every*
+sub-question is insufficient, `generate` makes no LLM call and returns a fixed "The documents provided do not
+establish …" answer, so the agent can't talk itself into an answer from nothing. On `main`, weak sub-questions counted
+as done; in both of the agent's unanswerable-question failures, the evidence came from rounds graded ambiguous at top
+scores of 0.13–0.84 and was then used as if it answered the question.
+
+**Evidence passed to generation** is capped at the best 8 strips per sub-question and 16 overall (round-robin across
+sub-questions), and a strip already contained in a whole chunk being passed is dropped. On `main` the agent's
+unfaithful answers came with ~1.7× the evidence of its faithful ones (13.5 vs 9.1 items).
+
 **Thresholds are measured, not guessed** (`run_eval.py calibrate`). The QA set has only answerable questions, whose top
 rerank scores saturate (p10 = 0.89), so on its own it can't calibrate anything. We add **cross-matter negatives**: each
-question is also asked against another matter's data room, where its answer cannot exist (median top score 0.017). The rule: τ_low = the lowest score of any positive, τ_high = just above the highest negative. Both are error-free on
-the calibration set; in between, the Haiku grader decides.
+question is also asked against another matter's data room, where its answer cannot exist (median top score 0.017).
+On this branch the negatives come from a matter of the **same practice area** (harder look-alikes), and calibration uses
+the **dev split only**.
+
+The rule on `main` was error-free on the calibration set: τ_low = the lowest score of any positive, τ_high = just
+above the highest negative. In between, the Haiku grader decides. The table shows what it produced:
 
 | Index | Positives p10 | Negatives median | τ_low | τ_high | Ambiguous share (LLM graded) |
 |---|---|---|---|---|---|
@@ -46,9 +62,15 @@ the calibration set; in between, the Haiku grader decides.
 | `ctx` (Colab; **what the committed agent loads**) | 0.94 | 0.011 | 0.09 | 0.95 | 20% |
 
 The two classes are almost perfectly separated, but the error-free rule is **sensitive to single outliers**. On `ctx`, one
-answerable question topped out below 0.10 and one negative reached 0.95, which widened the band, so more retrievals
-go to the LLM. That costs calls, not correctness. A percentile rule (e.g. 5th/95th) would be more robust and is
-the next step.
+answerable question topped out below 0.10 and one negative reached 0.95, which widened the band. That cost more than
+calls: with τ_low = 0.09, retrievals topping out at 0.13–0.44 were "ambiguous", the grader kept loosely related
+passages, and the agent answered two unanswerable questions from them.
+
+**This branch uses a quantile rule** (`run_eval.thresholds`, `CFG.crag_tail = 0.02`): τ_low = the 2nd percentile of the
+positives and τ_high = the 98th percentile of the negatives, i.e. each threshold may misclassify at most 2% of its own
+class, so one outlier can't move it. On the `main` calibration scores this gives τ_low = 0.59 and τ_high = 0.91 (6%
+ambiguous); both unanswerable-question failures above would have been graded incorrect or weak. Answerable questions
+below τ_low still get the two corrective rewrites before the agent abstains.
 
 **Deviations from the paper, and why:**
 - **Evaluator:** our existing cross-encoder replaces the paper's fine-tuned T5, with thresholds calibrated on our eval set. The LLM is called only in the ambiguous band, which keeps cost low.

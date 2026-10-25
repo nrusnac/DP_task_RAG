@@ -1,13 +1,17 @@
 # DP_task_RAG: advanced + agentic RAG over Harvey LAB legal data rooms
 
-RAG over the **`antitrust-competition`** practice area of [Harvey LAB](https://github.com/harveyai/harvey-labs/tree/main/tasks): 31 matters, 230 documents (docx/xlsx/eml/pptx), ~2.1M tokens.
+RAG over the **`antitrust-competition`** practice area of [Harvey LAB](https://github.com/harveyai/harvey-labs/tree/main/tasks) plus 13 deal-regulatory matters (merger control / HSR / SPA, CFIUS): 44 matters, 318 documents (docx/xlsx/eml/pptx), ~3.05M tokens.
+
+> **Branch `agent-improvements`:** faithfulness and abstention fixes for the agent, a corpus +38%, Qwen3.5-4B contexts and
+> a held-out test split ([decision log #28–37](docs/07-decision-log.md#branch-agent-improvements)). The Results below are
+> still the `main` run (dev questions, 31-matter corpus) until the branch is rerun on Colab.
 - **Runs on a free Colab T4.** The GPU runs embeddings, reranking, CRAG strip scoring and the one-off contextualization LLM.
 - **Uses Claude through `claude_agent_sdk`** for reasoning, with the subscription token kept in Colab Secrets. An Anthropic-API fallback is included.
 
 | Notebook | What | Colab |
 |---|---|---|
 | `notebooks/02_demo_and_eval.ipynb` | build indexes, demo the agent, run the evaluation, Phoenix traces | [Open in Colab](https://colab.research.google.com/github/nrusnac/DP_task_RAG/blob/main/notebooks/02_demo_and_eval.ipynb) |
-| `notebooks/01_contextualize_colab.ipynb` | one-off Contextual Retrieval job (Qwen2.5-3B on vLLM, ~80–90 min, output committed) | [Open in Colab](https://colab.research.google.com/github/nrusnac/DP_task_RAG/blob/main/notebooks/01_contextualize_colab.ipynb) |
+| `notebooks/01_contextualize_colab.ipynb` | one-off Contextual Retrieval job (Qwen3.5-4B on vLLM, ~2–2.5 h, output committed or read from Drive) | [Open in Colab](https://colab.research.google.com/github/nrusnac/DP_task_RAG/blob/main/notebooks/01_contextualize_colab.ipynb) |
 
 ## What's inside
 **Advanced RAG techniques** ([docs/03](docs/03-rag-techniques.md)):
@@ -25,7 +29,7 @@ RAG over the **`antitrust-competition`** practice area of [Harvey LAB](https://g
 - Every decision is logged and traced.
 
 **Evaluation** ([docs/05](docs/05-evaluation.md)):
-- a QA set derived from Harvey rubric criteria, with silver retrieval labels
+- a QA set derived from Harvey rubric criteria, with silver retrieval labels, split into **dev** (tuning) and a matter-level held-out **test** split
 - retrieval ablations
 - CRAG threshold calibration
 - naive vs. single-shot vs. agent, judged with **Harvey's own rubric prompt** plus faithfulness
@@ -36,7 +40,7 @@ RAG over the **`antitrust-competition`** practice area of [Harvey LAB](https://g
 
 ```mermaid
 flowchart LR
-    D[(230 docs)] --> P[parse + chunk] --> C[contextualize<br/>Qwen2.5-3B · vLLM · T4] --> I[BGE-M3 + BM25]
+    D[(318 docs)] --> P[parse + chunk] --> C[contextualize<br/>Qwen3.5-4B · vLLM · T4] --> I[BGE-M3 + BM25]
     Q([question]) --> R{router} --> RET[hybrid + rerank] --> G{CRAG} --> RF[refine] --> GEN[Claude · cited answer]
     G -.rewrite + HyDE.-> RET
     I --- RET
@@ -153,7 +157,8 @@ All design choices, with alternatives and measurements: [docs/07-decision-log.md
 pip install -e ".[obs,dev]"
 python -m hrag.ingest.build                      # A1-A3: download subset, parse, chunk  -> artifacts/
 python -m hrag.index.build --variants raw header ctx   # A5 (needs artifacts/contexts.jsonl for ctx)
-python -m hrag.eval.run_eval retrieval           # retrieval ablations (no LLM)
+python -m hrag.eval.run_eval retrieval           # retrieval ablations per split (no LLM)
+python -m hrag.eval.run_eval generation --systems naive single_shot agent --resume   # held-out test split
 python -c "from hrag.agent.graph import answer_sync as a; print(a('What is the post-merger HHI for flame retardants in the South Central region?', task_id='analyze-iss-antitrust-transaction-structure')['answer'])"
 pytest -q
 ```

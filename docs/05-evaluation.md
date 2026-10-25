@@ -13,7 +13,11 @@ flowchart LR
     GE --> AG["C5 agent metrics<br/>routes, calls, latency"]
 ```
 
-**C1 · QA generation** (`build_qa.py`): sample 14 non-drafting tasks × 8 criteria. One Sonnet call per task rewrites each criterion as:
+**Splits.** `qa.jsonl` has a `split` field:
+- **`dev`** (110 questions, 14 antitrust matters): every question used on `main`. They shaped the design: 30 tuned prompts and the refinement fix, 57 labelled ones set the CRAG thresholds and the retrieval choices.
+- **`test`** (126 questions, 16 matters): the 4 antitrust matters with no questions on `main` plus the 12 non-drafting deal-regulatory matters added to the corpus ([01](01-dataset.md)). Generated after the branch's code changes, and used by nothing that tunes the system. A **matter-level** held-out set: no test matter appears in dev. (One caveat: the demo cells use one test matter, `analyze-iss-antitrust-transaction-structure`, so its documents were seen during development, but none of its rubric criteria were.)
+
+**C1 · QA generation** (`build_qa.py`): `build` sampled 14 non-drafting tasks × 8 criteria (dev); `extend` adds 8 criteria for every non-drafting matter without questions (test), keeping existing questions untouched. One Sonnet call per task rewrites each criterion as:
 - the *question a lawyer would ask the data room*, without revealing the answer
 - an expected answer
 - 0–4 **verbatim key facts** ("3,552", "VelaroConnect", "Section 7A")
@@ -21,18 +25,20 @@ flowchart LR
 
 Drafting tasks are excluded, and `skip` criteria are dropped, because those criteria grade the lawyer's own deliverable (format, a proposal it should make) rather than what the documents say.
 
-**C2 · Silver labels:** a chunk of the *same matter* is gold if it contains the key facts (all of 1–2 facts, otherwise ≥ 2/3 of them; normalised, with "1,242" ≡ "1242"). Questions whose facts match more than 8 chunks are left unlabelled (too generic). *Silver, not gold:* cheap, objective and reproducible; good for **comparing configurations**, not for absolute claims.
+**C2 · Silver labels:** a chunk of the *same matter* is gold if it contains the key facts (all of 1–2 facts, otherwise ≥ 2/3 of them; normalised, with "1,242" ≡ "1242"). *Silver, not gold:* cheap, objective and reproducible; good for **comparing configurations**, not for absolute claims.
+- When the facts match **more than 8 chunks** (too generic on their own; 25 dev questions on `main` were left unlabelled for this), one Sonnet call sees the question, expected answer and up to 30 of those matching chunks and picks the ones that state the answer (`gold_source: "llm"`, at most 8). The candidates come from string matching, never from our retriever, so the labels don't favour it.
+- Result: dev 82/110 labelled (57 string + 25 LLM; was 57/110), test 98/126 (77 + 21). The rest have no verbatim facts (analysis questions) or facts that match nothing. `build_qa relabel --split dev` recomputes labels without regenerating questions.
 
-**C3 · Retrieval** (`run_eval.py retrieval`, no LLM cost): every combination of index variant `raw` / `header` / `ctx` × `bm25` / `dense` / `hybrid` / `hybrid+rerank`, scored by:
+**C3 · Retrieval** (`run_eval.py retrieval`, no LLM cost), **per split**: every combination of index variant `raw` / `header` / `ctx` × `bm25` / `dense` / `hybrid` / `hybrid+rerank` (reranker order replaces the hybrid order) / `hybrid+rerank(rrf)` (rank fusion of both, the default on this branch), scored by:
 - **Recall@k** (hit rate)
 - **MRR**
 - **nDCG@10**
 
-**CRAG calibration** (`run_eval.py calibrate`): the top rerank score for answerable questions (positives) vs. the same questions asked in another matter's data room (cross-matter negatives). τ_low is the lowest positive score and τ_high is just above the highest negative; the band in between is LLM-graded.
+**CRAG calibration** (`run_eval.py calibrate`, **dev split only**): the top rerank score for answerable questions (positives) vs. the same questions asked in another matter's data room of the **same practice area** (cross-matter negatives). τ_low = 2nd percentile of the positives, τ_high = 98th percentile of the negatives (`CFG.crag_tail`); the band in between is LLM-graded. On `main` the rule was min/max (error-free), which one outlier per side could move ([04](04-agentic-module.md#crag-yan-et-al-2024)).
 
-**Unanswerable questions** (`run_eval.py negatives`): the same cross-matter negatives run end to end through single-shot and the agent. A Haiku judge checks whether each answer declined instead of answering from look-alike evidence.
+**Unanswerable questions** (`run_eval.py negatives`, test split, 40 questions): cross-matter negatives (same practice area) run end to end through single-shot and the agent. A Haiku judge checks whether each answer declined instead of answering from look-alike evidence.
 
-**C4 · Generation** (`run_eval.py generation`): systems compared on the same questions:
+**C4 · Generation** (`run_eval.py generation`, default: the whole test split): systems compared on the same questions:
 - `naive`: dense-only, raw-text index, top-8 chunks, one generation call
 - `single_shot`: hybrid + rerank on the contextual index, top-8 chunks, one call (advanced but fixed)
 - `agent`: the LangGraph Adaptive-RAG + CRAG module
@@ -49,8 +55,35 @@ Metrics:
 
 Every eval item is a traced span (`eval.item`), so failures can be opened in Phoenix.
 
+**Long runs and the subscription limit.** The test eval is ~1,400 Claude calls (5c) plus ~800 (5d, 5e), more than one
+subscription session. A session-limit error (`llm.QuotaError`) is raised at once instead of being retried, the run
+stops scheduling new questions, and the unfinished ones are not recorded. `resume=True` (`--resume`) keeps every
+finished answer and runs only the missing (question, system) pairs, so the notebook cell is simply re-run after the
+reset. On `main`, such errors were retried, recorded as failures, and the run continued: 18 of 24 runs of one test
+were lost that way.
+
+## Unfaithful-answer patterns
+The agent's 15 unfaithful answers in the final `main` run (faithfulness 0.50 vs. single-shot 0.633 and naive 0.70) fall
+into six patterns (some answers show several). Each became a rule in the shared generation prompt on this branch
+([03](03-rag-techniques.md#9-grounded-generation)):
+
+| Pattern | Questions |
+|---|---|
+| exclusivity or completeness the evidence doesn't state ("the only …") | C-019, C-045, C-054, C-006, C-060 |
+| inferences or characterizations not labelled "Analysis:" | C-050, C-054 |
+| headings or bottom lines that add a claim | C-022, C-074 |
+| a proposed redline presented as adopted terms | C-005 |
+| "signed" when the signature line was blank | C-020 |
+| a fact attributed to a source or party that doesn't state it | C-037, C-046, C-004 |
+
+Within the agent, unfaithful answers came with ~1.7× the evidence of faithful ones (13.5 vs 9.1 items), which is why
+the evidence passed to generation is now capped ([04](04-agentic-module.md)).
+
 ## Results
 Run on a Colab T4 with `notebooks/02_demo_and_eval.ipynb`. The JSON outputs are in `artifacts/eval/`.
+
+> **Branch `agent-improvements`:** the tables below are the `main` results (dev questions, old corpus, Qwen2.5-3B
+> contexts). They will be replaced by the rerun on this branch (test split, 44-matter corpus, Qwen3.5-4B contexts).
 
 <!-- RESULTS:START -->
 **Retrieval** (57 questions with silver labels; searched within the matter's data room unless marked corpus-wide; `foreign@5` = share of top-5 hits from other matters)
@@ -203,6 +236,6 @@ Run on a Colab T4 with `notebooks/02_demo_and_eval.ipynb`. The JSON outputs are 
 - Silver labels can miss gold chunks that paraphrase a fact ("fifty percent") and can credit chunks that mention a figure in passing. Fine for relative comparisons; absolute recall is approximate.
 - One judge model (Claude), not Harvey's dual-judge profile (Claude + GPT), and our answers are short QA answers rather than full memos. Criteria written for memos are judged "in substance" for the question asked.
 - The sample is small (tens of questions), so differences of a few points are noise.
-- The CRAG thresholds are calibrated on the same questions used in the generation eval. It's only two parameters, so overfitting risk is low, but it is disclosed here.
-- **No held-out set for the fix.** The refinement fix was chosen after inspecting the first run's failures and confirmed on the same 30 questions. It targets a mechanism (don't shred chunks scored ≥ τ_high), not specific questions, but a fresh question sample would be the clean confirmation.
+- On `main`, the CRAG thresholds were calibrated on the same questions used in the generation eval, and the refinement fix was confirmed on the same 30 questions that exposed it. **This branch separates them:** calibration and every tuning decision use dev; the test split (16 matters never used) is only evaluated.
+- The prompt rules on this branch were written from the dev answers' failures; the test split is where they can be judged fairly.
 - **Run-to-run noise** (measured on unchanged pipelines): about ±1 question of pass rate and about ±7 points of faithfulness at n = 30.
