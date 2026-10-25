@@ -1,25 +1,31 @@
 {
- "n_tasks": 31,
- "n_docs": 230,
- "n_chunks": 5756,
- "tokens_total": 2085623,
- "tokens_median": 358,
- "tokens_p95": 594,
+ "harvey_commit": "e9b1f9f4dc25576f9a020d857e3e3a6420834dc3",
+ "n_tasks": 44,
+ "by_practice_area": {
+  "antitrust-competition": 31,
+  "corporate-ma": 8,
+  "international-trade-sanctions": 5
+ },
+ "n_docs": 318,
+ "n_chunks": 8627,
+ "tokens_total": 3049950,
+ "tokens_median": 339,
+ "tokens_p95": 593,
  "tokens_max": 1008,
  "by_kind": {
-  "text": 4283,
-  "table": 1012,
-  "slide": 309,
-  "email": 152
+  "text": 6658,
+  "table": 1368,
+  "slide": 378,
+  "email": 223
  },
  "by_doc_type": {
-  "docx": 4607,
-  "xlsx": 686,
-  "pptx": 309,
-  "eml": 152,
+  "docx": 7111,
+  "xlsx": 913,
+  "pptx": 378,
+  "eml": 223,
   "txt": 2
  },
- "tracked_change_chunks": 27,
+ "tracked_change_chunks": 160,
  "failures": [],
- "seconds": 21.9
+ "seconds": 29.0
 }

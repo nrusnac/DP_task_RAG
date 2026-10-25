@@ -7,17 +7,17 @@ flowchart TD
     A["Harvey LAB repo<br/>tasks/antitrust-competition"] -->|git sparse-checkout| B["A1 ACQUIRE"]
     B --> C["A2 PARSE<br/>lxml docx / openpyxl / python-pptx / email"]
     C --> D["A3 CHUNK<br/>structure-aware + deterministic header"]
-    D --> E["A4 CONTEXTUALIZE<br/>Qwen2.5-3B on vLLM, one prompt per document"]
+    D --> E["A4 CONTEXTUALIZE<br/>Qwen3.5-4B on vLLM, one prompt per document"]
     D --> F
     E --> F["A5 INDEX<br/>BGE-M3 dense + BM25, variants raw / header / ctx"]
 ```
 
 | Step | Input → Output | Model / tool | Where | Code |
 |---|---|---|---|---|
-| A1 Acquire | GitHub → 31 `task.json` + 230 files | `git sparse-checkout` | CPU, 5 s | `ingest/build.py` |
+| A1 Acquire | GitHub → 44 `task.json` + 318 files (antitrust area + `config.extra_tasks`) | `git sparse-checkout` | CPU, 5 s | `ingest/build.py` |
 | A2 Parse | files → ordered elements (heading / para / table / slide / email) | `lxml` (recover, tracked changes), `openpyxl`, `python-pptx`, `email` | CPU | `ingest/parsers.py` |
-| A3 Chunk | elements → 5,756 chunks ≤ ~600 tokens + `[doc] (type) › section` header | BGE-M3 tokenizer | CPU, 30 s total for A1–A3 | `ingest/chunking.py` |
-| A4 Contextualize | each document with `[[ci]]` markers → `contexts.jsonl` | **Qwen2.5-3B-Instruct**, vLLM fp16, own venv + subprocess | **T4**, ~80–90 min, once | `ingest/contextualize.py`, `scripts/contextualize_vllm.py`, `notebooks/01_contextualize_colab.ipynb` |
+| A3 Chunk | elements → 8,627 chunks ≤ ~600 tokens + `[doc] (type) › section` header | BGE-M3 tokenizer | CPU, 30 s total for A1–A3 | `ingest/chunking.py` |
+| A4 Contextualize | each document with `[[ci]]` markers → `contexts.jsonl` | **Qwen3.5-4B** (fallback Qwen3-4B-Instruct-2507), vLLM fp16, own venv + subprocess | **T4**, ~2–2.5 h, once | `ingest/contextualize.py`, `scripts/contextualize_vllm.py`, `notebooks/01_contextualize_colab.ipynb` |
 | A5 Index | header [+ context] + chunk → dense matrix + BM25 | **BGE-M3** fp16; `bm25s` + legal token pattern | **T4** ~1.5 min per variant | `index/build.py` |
 
 ## Online query pipeline: the agentic module (LangGraph)
@@ -61,7 +61,7 @@ All Claude calls go through `hrag.llm.complete()`:
 ## Where each model runs
 | Model | Where | When | VRAM |
 |---|---|---|---|
-| Qwen2.5-3B-Instruct | T4, separate process | offline, once | vLLM reserves 85%; released on exit |
+| Qwen3.5-4B | T4, separate process | offline, once | vLLM reserves 85%; released on exit |
 | BGE-M3 (568M) | T4 | indexing + every query (~60 ms) | ~1.8 GB |
 | bge-reranker-v2-m3 (568M) | T4 | rerank (~0.75 s / 30 pairs) + CRAG strips (~1.3 s / 100) | ~1–3 GB |
 | Claude Haiku / Sonnet | Anthropic via `claude_agent_sdk` | routing, grading, rewriting, planning, generation, judging | – |

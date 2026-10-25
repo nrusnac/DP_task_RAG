@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 from ..config import CFG
-from ..ingest.contextualize import load_contexts
+from ..ingest.contextualize import context_models, load_contexts
 
 # Legal-aware BM25 tokens: keep figures and references whole ("3,552", "14.3", "50.0%", "$1.2"), drop 1-char words
 TOKEN_PATTERN = r"(?u)\$?\d+(?:[.,]\d+)*%?|\b\w\w+\b"
@@ -70,7 +70,8 @@ def build(variants=("header", "ctx"), cfg=CFG) -> dict:
         bm.index(bm25_tokenize(texts), show_progress=False)
         bm.save(str(cfg.index_dir / f"bm25_{v}"))
         report[v] = dict(n=len(texts), dense_s=round(t_dense, 1), bm25_s=round(time.perf_counter() - t0, 1),
-                         ctx_coverage=round(sum(c in contexts for c in df.chunk_id) / len(df), 3) if v == "ctx" else None)
+                         ctx_coverage=round(sum(c in contexts for c in df.chunk_id) / len(df), 3) if v == "ctx" else None,
+                         ctx_models=context_models(cfg.artifacts_dir / "contexts.jsonl") if v == "ctx" else None)
     (cfg.index_dir / "build_report.json").write_text(json.dumps(report, indent=1))
     return report
 

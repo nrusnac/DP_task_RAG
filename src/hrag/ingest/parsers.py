@@ -8,7 +8,8 @@ Every parser returns (title, elements); an element is a dict:
 
 Edge cases found while exploring the corpus (see docs/01-dataset.md):
 - docx tracked changes (w:ins / w:del) are rendered as [INSERTED: ...] / [DELETED: ...]; python-docx drops them.
-- malformed docx XML (an unescaped '&') is parsed with lxml's recover mode instead of crashing.
+- malformed docx XML (an unescaped '&') is parsed with lxml's recover mode instead of crashing; malformed xlsx
+  XML has its bare '&' escaped and is reloaded.
 - xlsx formula cells without a cached value keep their formula text instead of becoming empty.
 """
 from __future__ import annotations
@@ -180,10 +181,29 @@ def _fmt(v) -> str:
     return _ws(str(v))
 
 
+_BARE_AMP = re.compile(rb"&(?!(?:[A-Za-z]+|#\d+|#x[0-9A-Fa-f]+);)")
+
+
+def _repaired_zip(path: Path):
+    """Same workbook with bare '&' in its XML parts escaped (openpyxl has no recover mode)."""
+    import io
+    buf = io.BytesIO()
+    with zipfile.ZipFile(path) as zin, zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            zout.writestr(item, _BARE_AMP.sub(b"&amp;", data) if item.filename.endswith(".xml") else data)
+    buf.seek(0)
+    return buf
+
+
 def parse_xlsx(path: Path):
     import openpyxl
-    wv = openpyxl.load_workbook(path, data_only=True)
-    wf = openpyxl.load_workbook(path, data_only=False)
+    try:
+        wv = openpyxl.load_workbook(path, data_only=True)
+        wf = openpyxl.load_workbook(path, data_only=False)
+    except Exception:  # noqa: BLE001  -- malformed XML (unescaped '&'): repair and retry once
+        wv = openpyxl.load_workbook(_repaired_zip(path), data_only=True)
+        wf = openpyxl.load_workbook(_repaired_zip(path), data_only=False)
     elements = []
     for ws in wv.worksheets:
         wsf = wf[ws.title]

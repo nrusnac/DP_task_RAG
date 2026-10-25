@@ -1,4 +1,4 @@
-"""A4: Contextual Retrieval, per document (see docs/03-rag-techniques.md §2).
+"""A4: Contextual Retrieval, per document (see docs/03-rag-techniques.md §2). Model: config.context_model.
 
 Per-chunk prompting (Anthropic's original recipe) measured 2.62 s/chunk ≈ 2.9 h on a T4, because the whole document
 is re-sent for every chunk. Instead, each prompt carries the document ONCE with inline [[c1]]..[[cN]] markers and
@@ -60,6 +60,19 @@ def clean_context(text: str | None) -> str:
     for rx, rep in _CLEAN:
         t = rx.sub(rep, t).strip()
     return t
+
+
+def context_models(path) -> dict[str, int]:
+    """Which model wrote the contexts (rows from before the script recorded it count as "unrecorded")."""
+    out: dict[str, int] = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                m = json.loads(line).get("model") or "unrecorded"
+                out[m] = out.get(m, 0) + 1
+    except FileNotFoundError:
+        pass
+    return out
 
 
 def load_contexts(path) -> dict[str, str]:
