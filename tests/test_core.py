@@ -97,3 +97,101 @@ def test_llm_counter_isolated_per_task():
         return await asyncio.gather(fake_run(1), fake_run(3), fake_run(2))
 
     assert asyncio.run(main()) == [1, 3, 2]
+
+
+# ------------------------------------------------------------------ agent-improvements branch
+def test_fuse_rerank_orders_by_both_ranks_and_keeps_rerank_scores():
+    from hrag.retrieve.hybrid import Hit
+    cands = [Hit(i, f"c{i}", 0.0, "") for i in range(4)]          # first-stage order c0..c3
+    out = HybridRetriever.fuse_rerank(cands, [0.1, 0.9, 0.8, 0.2])  # reranker order c1, c2, c3, c0
+    assert [h.chunk_id for h in out] == ["c1", "c0", "c2", "c3"]
+    assert {h.chunk_id: h.score for h in out} == {"c0": 0.1, "c1": 0.9, "c2": 0.8, "c3": 0.2}
+
+
+def test_crag_thresholds_ignore_single_outliers():
+    import numpy as np
+    from hrag.eval.run_eval import thresholds
+    pos = np.r_[0.05, np.linspace(0.6, 1.0, 99)]   # one answerable question retrieved terribly
+    neg = np.r_[np.linspace(0.0, 0.7, 99), 0.99]   # one unanswerable question that looks answerable
+    assert thresholds(pos, neg, tail=0.02) == (0.60, 0.70)
+    lo, hi = thresholds(np.array([0.9, 0.95]), np.array([0.1, 0.2]), tail=0.02)
+    assert lo == hi  # no overlap: the ambiguous band collapses
+
+
+def test_select_evidence_dedupes_and_caps():
+    whole = dict(chunk_id="A", doc="d", text="Alpha one is here.\nBeta two is here.", score=0.99)
+    subqs = [dict(strips=[whole, dict(chunk_id="B", doc="d", text="Bravo strip text.", score=0.6)]),
+             dict(strips=[dict(chunk_id="A", doc="d", text="Beta two is here.", score=0.7),
+                          dict(chunk_id="C", doc="d", text="Charlie strip text.", score=0.5)])]
+    ev = graph._select_evidence(subqs, per_subq=8, max_total=16)
+    assert [e["chunk_id"] for e in ev] == ["A", "B", "C"]  # A's strip is inside the whole chunk A
+    ev = graph._select_evidence(subqs, per_subq=1, max_total=2)
+    assert [e["chunk_id"] for e in ev] == ["A"]  # sub-question 2's best strip is covered by A; cap 1 per sub-question
+
+
+def test_terminal_statuses_and_forced_abstain():
+    import asyncio
+    from hrag.eval.run_eval import ABSTAIN_MARKERS
+    r = CFG.max_corrective_rounds
+    st = {"subqs": [dict(q="a", status="ambiguous", rounds=r, strips=[{"chunk_id": "x", "text": "t"}]),
+                    dict(q="b", status="incorrect", rounds=r, strips=[{"chunk_id": "x", "text": "t"}]),
+                    dict(q="c", status="incorrect", rounds=r, strips=[])]}
+    out = asyncio.run(graph.refine(st))  # no "keep": no retriever needed
+    assert [s["status"] for s in out["subqs"]] == ["weak", "weak", "insufficient"]
+    st = {"question": "q", "matter": "m", "log": [], "subqs": [dict(q="c", status="insufficient", strips=[])]}
+    out = asyncio.run(graph.generate(st))  # all insufficient: answered without an LLM call
+    assert out["evidence"] == [] and any(m in out["answer"][:250].lower() for m in ABSTAIN_MARKERS)
+
+
+def test_quota_errors_fail_fast(monkeypatch):
+    import asyncio
+    from hrag import llm
+    msg = "Claude Code returned an error result: You've hit your session limit · resets 8:50am (UTC) (exit code: 1)"
+    assert llm._is_quota(Exception(msg))
+    assert not llm._is_quota(Exception("429 rate_limit_error: exceeded your per-minute rate limit"))
+    calls = []
+
+    async def boom(*a, **k):
+        calls.append(1)
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(llm, "backend", lambda: "sdk")
+    monkeypatch.setattr(llm, "_sdk_call", boom)
+    with pytest.raises(llm.QuotaError):
+        asyncio.run(llm.complete("hi", purpose="t"))
+    assert len(calls) == 1  # no retries
+
+
+def test_resume_runs_only_missing_pairs(tmp_path):
+    import asyncio
+    import json
+    from hrag import llm
+    from hrag.eval.run_eval import _load_done, _run_pairs
+    out = tmp_path / "gen.jsonl"
+    items = [dict(qid=f"q{i}") for i in range(4)]
+    seen = []
+
+    def work_factory(quota_at):
+        async def work(it, system):
+            seen.append(it["qid"])
+            if it["qid"] == quota_at:
+                raise llm.QuotaError("session limit")
+            return dict(qid=it["qid"], system=system, verdict="pass")
+        return work
+
+    pairs = [(it, "s") for it in items]
+    left = asyncio.run(_run_pairs(pairs, work_factory("q2"), out, concurrency=1, n_total=4, done=0))
+    assert left == 2 and [json.loads(l)["qid"] for l in open(out)] == ["q0", "q1"]
+    done = _load_done(out, resume=True)
+    seen.clear()
+    todo = [(it, "s") for it in items if (it["qid"], "s") not in done]
+    assert asyncio.run(_run_pairs(todo, work_factory(None), out, 1, 4, len(done))) == 0
+    assert seen == ["q2", "q3"] and len(open(out).readlines()) == 4
+
+
+def test_overmatched_facts_go_to_llm_labelling():
+    from hrag.eval.build_qa import match_chunks
+    df = pd.DataFrame(dict(chunk_id=[f"c{i}" for i in range(10)], header=["h"] * 10,
+                           text=[f"Acme Corp clause {i}" for i in range(10)]))
+    item = {"key_facts": ["Acme Corp"]}
+    assert len(match_chunks(item, df)) == 10 and silver_labels(item, df) == []  # too generic for a string label

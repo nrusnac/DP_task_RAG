@@ -3,9 +3,16 @@
 Harvey LAB has no retrieval gold labels (criteria[].sources is empty), so:
   C1  Claude rewrites each sampled criterion as the question a lawyer would ask the data room, plus the expected
       answer and 0-4 verbatim key facts (figures, names, section refs) that the source document must contain.
-  C2  A chunk of that task's data room is a silver gold chunk if it contains the key facts (normalised match).
+  C2  A chunk of that task's data room is a silver gold chunk if it contains the key facts (normalised match). When
+      the facts match more than 8 chunks (too generic to be a label on their own), Claude picks the chunks among
+      those matches that actually answer the question (gold_source="llm"). Candidates come from string matching,
+      never from our retriever, so the labels don't favour it.
 
-    python -m hrag.eval.build_qa --tasks 10 --per-task 8
+Splits: `dev` = the 110 questions that shaped the design; `test` = questions for matters never used before.
+
+    python -m hrag.eval.build_qa build --tasks 10 --per-task 8   # (re)build from scratch: all items are dev
+    python -m hrag.eval.build_qa extend --split test             # add questions for every matter not yet covered
+    python -m hrag.eval.build_qa relabel --split dev             # recompute silver labels, keep the questions
 """
 from __future__ import annotations
 
@@ -19,6 +26,10 @@ import pandas as pd
 
 from .. import llm
 from ..config import CFG
+
+QA_PATH = CFG.artifacts_dir / "eval" / "qa.jsonl"
+MAX_GOLD = 8              # more string matches than this = facts too generic to be a label on their own
+MAX_LLM_CANDIDATES = 30   # passages shown to the labelling call
 
 QA_PROMPT = """You are building an evaluation set for a retrieval system over one legal matter's data room.
 The questions must test what the SOURCE DOCUMENTS say (facts, figures, terms, positions, issues they reveal), never
@@ -50,6 +61,19 @@ QA_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["item
                                               "key_facts": {"type": "array", "items": {"type": "string"}},
                                               "kind": {"type": "string", "enum": ["fact", "analysis", "skip"]}}}}}}
 
+LABEL_PROMPT = """You are labelling an evaluation set for document retrieval over one legal matter's data room.
+Every numbered passage below mentions the question's key facts. Return the numbers of the passages that themselves
+state the information needed to answer the question (at most {max_gold}, most important first). Exclude passages that
+only mention the same names or figures in passing or in a different context. Return an empty list if none does.
+
+Question: {question}
+Expected answer: {expected_answer}
+Key facts: {key_facts}
+
+{passages}"""
+LABEL_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["relevant"],
+                "properties": {"relevant": {"type": "array", "items": {"type": "integer"}}}}
+
 
 def _norm(s: str) -> str:
     s = s.lower().replace("’", "'").replace("—", "-").replace("–", "-")
@@ -65,65 +89,170 @@ def _variants(fact: str) -> list[str]:
     return [v for v in out if len(v) >= 2]
 
 
-def silver_labels(item: dict, task_chunks: pd.DataFrame) -> list[str]:
+def match_chunks(item: dict, task_chunks: pd.DataFrame) -> list[str]:
+    """Every chunk of the matter that contains the item's key facts (all of 1-2 facts, else >= 2/3 of them), the
+    chunks hitting the most facts first."""
     facts = [f for f in item.get("key_facts", []) if f and len(f.strip()) >= 2]
     if not facts:
         return []
     texts = [_norm(t) for t in (task_chunks.header + " " + task_chunks.text)]
     texts = [t + " " + re.sub(r"(?<=\d),(?=\d{3})", "", t) for t in texts]  # also match "1242" against "1,242"
     need = len(facts) if len(facts) <= 2 else -(-2 * len(facts) // 3)  # all of 1-2 facts, else >= 2/3 of them
-    gold = []
-    for cid, t in zip(task_chunks.chunk_id, texts):
+    hits = []
+    for pos, (cid, t) in enumerate(zip(task_chunks.chunk_id, texts)):
         hit = sum(any(v in t for v in _variants(f)) for f in facts)
         if hit >= need:
-            gold.append(cid)
-    return gold if len(gold) <= 8 else []  # facts matching >8 chunks are too generic to serve as labels
+            hits.append((-hit, pos, cid))
+    return [cid for _, _, cid in sorted(hits)]
+
+
+def silver_labels(item: dict, task_chunks: pd.DataFrame) -> list[str]:
+    gold = match_chunks(item, task_chunks)
+    pos = {c: i for i, c in enumerate(task_chunks.chunk_id)}
+    gold = sorted(gold, key=pos.get)  # document order, as before
+    return gold if len(gold) <= MAX_GOLD else []  # facts matching >8 chunks are too generic to serve as labels
+
+
+async def llm_label(item: dict, task_chunks: pd.DataFrame, candidates: list[str]) -> list[str]:
+    """Pick, among string-matched candidate chunks, the ones that answer the question (at most MAX_GOLD)."""
+    rows = task_chunks.set_index("chunk_id").loc[candidates[:MAX_LLM_CANDIDATES]]
+    passages = "\n\n".join(f"[{i}] ({r.header})\n{r.text[:1200]}" for i, r in enumerate(rows.itertuples(), 1))
+    out = await llm.complete(LABEL_PROMPT.format(max_gold=MAX_GOLD, question=item["question"],
+                                                 expected_answer=item["expected_answer"],
+                                                 key_facts=", ".join(item["key_facts"]), passages=passages),
+                             model=CFG.strong_llm, schema=LABEL_SCHEMA, purpose="qa_label", max_tokens=1000)
+    picked = [i for i in dict.fromkeys(out.get("relevant", [])) if 1 <= i <= len(rows)][:MAX_GOLD]
+    return [rows.index[i - 1] for i in picked]
+
+
+async def label(item: dict, task_chunks: pd.DataFrame) -> dict:
+    """gold + gold_source ("string" | "llm" | None) + n_matches for one item."""
+    m = match_chunks(item, task_chunks)
+    if len(m) > MAX_GOLD:
+        return dict(gold=await llm_label(item, task_chunks, m), gold_source="llm", n_matches=len(m))
+    gold = silver_labels(item, task_chunks)
+    return dict(gold=gold, gold_source="string" if gold else None, n_matches=len(m))
+
+
+def _gather_ok(res: list, what: str) -> list:
+    """Results of gather(return_exceptions=True): a quota error stops the build; other errors are reported."""
+    for r in res:
+        if isinstance(r, llm.QuotaError):
+            raise r
+    errors = [repr(r)[:200] for r in res if isinstance(r, Exception)]
+    if errors:
+        print(f"{what}: {len(errors)} errors", errors)
+    return [r for r in res if not isinstance(r, Exception)]
+
+
+async def _items_for_task(t: dict, crit: list[dict], tc: pd.DataFrame, split: str) -> list[dict]:
+    crit_txt = "\n".join(f"- id={c['id']} | {c['title']} | {c['match_criteria']}" for c in crit)
+    out = await llm.complete(QA_PROMPT.format(title=t["title"], instructions=t["instructions"][:1500], criteria=crit_txt),
+                             model=CFG.strong_llm, schema=QA_SCHEMA, purpose="qa_gen", max_tokens=8000)
+    by_id = {c["id"]: c for c in crit}
+    items = []
+    for it in out["items"]:
+        c = by_id.get(it["criterion_id"])
+        if not c or it["kind"] == "skip":
+            continue
+        item = dict(qid=f"{t['task_id']}::{c['id']}", task_id=t["task_id"], split=split, criterion_id=c["id"],
+                    criterion_title=c["title"], match_criteria=c["match_criteria"],
+                    question=it["question"], expected_answer=it["expected_answer"],
+                    key_facts=it["key_facts"], kind=it["kind"])
+        items.append(item | await label(item, tc))
+    return items
+
+
+def _questionable(tasks: list[dict]) -> list[dict]:
+    # drafting tasks grade the lawyer's own deliverable; analysis/extraction tasks test what the documents say
+    return [t for t in tasks if not t["task_id"].startswith("draft-")]
+
+
+def _write(items: list[dict]) -> None:
+    QA_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(QA_PATH, "w") as f:
+        for i in items:
+            f.write(json.dumps(i) + "\n")
+
+
+def _report(items: list[dict], **extra) -> None:
+    by = lambda key: {k: sum(i.get(key) == k for i in items) for k in sorted({i.get(key) for i in items}, key=str)}  # noqa: E731
+    print(json.dumps(dict(n_items=len(items), n_with_gold=sum(bool(i["gold"]) for i in items), by_split=by("split"),
+                          by_kind=by("kind"), gold_source=by("gold_source"), **extra, llm=llm.STATS.snapshot()),
+                     indent=1))
+
+
+def _load_inputs():
+    tasks = [json.loads(l) for l in open(CFG.artifacts_dir / "tasks.jsonl")]
+    chunks = pd.read_parquet(CFG.artifacts_dir / "chunks.parquet")
+    return tasks, chunks
 
 
 async def build(n_tasks: int = 10, per_task: int = 8, seed: int = 7) -> list[dict]:
-    tasks = [json.loads(l) for l in open(CFG.artifacts_dir / "tasks.jsonl")]
-    chunks = pd.read_parquet(CFG.artifacts_dir / "chunks.parquet")
+    """Original builder (main): sample n_tasks matters, per_task criteria each. Overwrites qa.jsonl."""
+    tasks, chunks = _load_inputs()
     rng = random.Random(seed)
-    # drafting tasks grade the lawyer's own deliverable; analysis/extraction tasks test what the documents say
-    tasks = [t for t in tasks if not t["task_id"].startswith("draft-")]
-    tasks = rng.sample(tasks, min(n_tasks, len(tasks)))
-
-    async def one(t):
-        crit = rng.sample(t["criteria"], min(per_task, len(t["criteria"])))
-        crit_txt = "\n".join(f"- id={c['id']} | {c['title']} | {c['match_criteria']}" for c in crit)
-        out = await llm.complete(QA_PROMPT.format(title=t["title"], instructions=t["instructions"][:1500],
-                                                  criteria=crit_txt),
-                                 model=CFG.strong_llm, schema=QA_SCHEMA, purpose="qa_gen", max_tokens=8000)
-        by_id = {c["id"]: c for c in crit}
-        tc = chunks[chunks.task_id == t["task_id"]]
-        items = []
-        for it in out["items"]:
-            c = by_id.get(it["criterion_id"])
-            if not c or it["kind"] == "skip":
-                continue
-            items.append(dict(qid=f"{t['task_id']}::{c['id']}", task_id=t["task_id"], criterion_id=c["id"],
-                              criterion_title=c["title"], match_criteria=c["match_criteria"],
-                              question=it["question"], expected_answer=it["expected_answer"],
-                              key_facts=it["key_facts"], kind=it["kind"], gold=silver_labels(it, tc)))
-        return items
-
-    res = await asyncio.gather(*[one(t) for t in tasks], return_exceptions=True)
-    items = [i for r in res if not isinstance(r, Exception) for i in r]
-    errors = [repr(r)[:200] for r in res if isinstance(r, Exception)]
-    out_dir = CFG.artifacts_dir / "eval"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    with open(out_dir / "qa.jsonl", "w") as f:
-        for i in items:
-            f.write(json.dumps(i) + "\n")
-    print(json.dumps(dict(n_items=len(items), n_with_gold=sum(bool(i["gold"]) for i in items),
-                          by_kind={k: sum(i["kind"] == k for i in items) for k in ("fact", "analysis")},
-                          errors=errors, llm=llm.STATS.snapshot()), indent=1))
+    tasks = rng.sample(_questionable(tasks), min(n_tasks, len(_questionable(tasks))))
+    jobs = [_items_for_task(t, rng.sample(t["criteria"], min(per_task, len(t["criteria"]))),
+                            chunks[chunks.task_id == t["task_id"]], "dev") for t in tasks]
+    items = [i for r in _gather_ok(await asyncio.gather(*jobs, return_exceptions=True), "qa_gen") for i in r]
+    _write(items)
+    _report(items)
     return items
+
+
+async def extend(per_task: int = 8, seed: int = 7, split: str = "test") -> list[dict]:
+    """Append questions for every questionable matter that has none yet (existing qids and labels untouched)."""
+    tasks, chunks = _load_inputs()
+    existing = [json.loads(l) for l in open(QA_PATH)] if QA_PATH.exists() else []
+    existing = [dict(i, split=i.get("split", "dev")) for i in existing]  # rows from before splits existed are dev
+    have = {i["task_id"] for i in existing}
+    todo = [t for t in _questionable(tasks) if t["task_id"] not in have]
+    print("new matters:", [t["task_id"] for t in todo], flush=True)
+    jobs = []
+    for t in todo:
+        rng = random.Random(f"{seed}:{t['task_id']}")  # per-matter seed: independent of which matters exist
+        jobs.append(_items_for_task(t, rng.sample(t["criteria"], min(per_task, len(t["criteria"]))),
+                                    chunks[chunks.task_id == t["task_id"]], split))
+    new = [i for r in _gather_ok(await asyncio.gather(*jobs, return_exceptions=True), "qa_gen") for i in r]
+    _write(existing + new)
+    _report(existing + new, added=len(new), new_matters=len(todo))
+    return new
+
+
+async def relabel(split: str | None = None) -> list[dict]:
+    """Recompute the silver labels (string match, LLM pick when >8 matches) of every item, or of one split's items;
+    questions are kept."""
+    _, chunks = _load_inputs()
+    items = [dict(i, split=i.get("split", "dev")) for i in map(json.loads, open(QA_PATH))]
+    todo = [i for i in items if split in (None, i["split"])]
+    res = await asyncio.gather(*[label(i, chunks[chunks.task_id == i["task_id"]]) for i in todo],
+                               return_exceptions=True)
+    for r in res:
+        if isinstance(r, llm.QuotaError):
+            raise r
+    new = {}
+    for i, r in zip(todo, res):
+        if isinstance(r, Exception):  # keep the old label rather than silently dropping it
+            print("relabel error", i["qid"], repr(r)[:200])
+            r = dict(gold=i.get("gold", []), gold_source=i.get("gold_source"), n_matches=i.get("n_matches"))
+        new[i["qid"]] = i | r
+    out = [new.get(i["qid"], i) for i in items]
+    _write(out)
+    _report(out)
+    return out
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
+    ap.add_argument("what", choices=["build", "extend", "relabel"])
     ap.add_argument("--tasks", type=int, default=10)
     ap.add_argument("--per-task", type=int, default=8)
+    ap.add_argument("--split", default=None, help="extend: split of the new items (default test); relabel: only this split")
     a = ap.parse_args()
-    asyncio.run(build(a.tasks, a.per_task))
+    if a.what == "build":
+        asyncio.run(build(a.tasks, a.per_task))
+    elif a.what == "extend":
+        asyncio.run(extend(a.per_task, split=a.split or "test"))
+    else:
+        asyncio.run(relabel(a.split))
