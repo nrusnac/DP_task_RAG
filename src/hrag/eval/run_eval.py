@@ -5,7 +5,7 @@ never used while building it). Calibration uses dev only; the generation eval de
 
     python -m hrag.eval.run_eval retrieval                       # no LLM calls: every retrieval configuration, per split
     python -m hrag.eval.run_eval calibrate                       # CRAG thresholds from dev rerank-score distributions
-    python -m hrag.eval.run_eval generation --systems naive single_shot agent --resume   # whole test split
+    python -m hrag.eval.run_eval generation --tag test_v2 --resume          # whole test split: single_shot vs. agent
     python -m hrag.eval.run_eval generation --n 20 --systems agent:simple agent:complex agent   # Adaptive-RAG ablation
     python -m hrag.eval.run_eval negatives --n 40 --systems single_shot agent                   # unanswerable questions
 
@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import json
 import random
+import re
 import time
 from functools import lru_cache
 from pathlib import Path
@@ -164,6 +165,20 @@ def calibrate(variant: str | None = None, seed: int = 11, split: str = "dev") ->
 # ------------------------------------------------------------------------------------------- C4-C5 generation
 ABSTAIN_MARKERS = ("do not establish", "does not establish", "not found in", "no evidence", "do not contain",
                    "does not contain", "not addressed in")
+_CITATION = re.compile(r"\[\d+\]")
+
+
+def abstained(answer: str | None) -> bool:
+    """A whole-answer decline: opens with a decline AND cites nothing. ("Short answer: the documents do not establish
+    X. They show Y [2]" is a partial answer, not an abstention: on the first test run 48 of 51 "abstentions" cited
+    evidence.)"""
+    a = answer or ""
+    return any(m in a[:250].lower() for m in ABSTAIN_MARKERS) and not _CITATION.search(a)
+
+
+def hedged(answer: str | None) -> bool:
+    """Says somewhere that the documents don't establish something (tracks over-hedging)."""
+    return any(m in (answer or "").lower() for m in ("do not establish", "does not establish"))
 
 
 async def _run_system(system: str, it: dict, variant: str) -> dict:
@@ -248,7 +263,7 @@ async def generation(n: int | None = None, systems=("single_shot", "agent"), see
             return dict(qid=it["qid"], system=system, kind=it["kind"], route=res.get("route"),
                         verdict=corr["verdict"], judge_reasoning=corr["reasoning"],
                         faithful=faith.get("faithful"), unsupported=faith.get("unsupported"),
-                        abstained=any(m in (res["answer"] or "")[:250].lower() for m in ABSTAIN_MARKERS),
+                        abstained=abstained(res["answer"]), hedged=hedged(res["answer"]),
                         evidence_hits_gold=bool(set(it["gold"]) & {e["chunk_id"] for e in res["evidence"]})
                         if it["gold"] else None,
                         cited_gold=bool(set(it["gold"]) & cited) if it["gold"] else None,
@@ -346,7 +361,8 @@ def summarize_generation(records: list[dict]) -> dict:
             pass_rate_fact=mean([r["verdict"] == "pass" for r in rs if r["kind"] == "fact"]),
             pass_rate_analysis=mean([r["verdict"] == "pass" for r in rs if r["kind"] == "analysis"]),
             faithful_rate=mean([bool(r["faithful"]) for r in rs if r["faithful"] is not None]),
-            abstain_rate=mean([r["abstained"] for r in rs]),
+            abstain_rate=mean([abstained(r["answer"]) for r in rs]),  # recomputed: older records used a looser rule
+            hedge_rate=mean([hedged(r["answer"]) for r in rs]),
             evidence_has_gold=mean([r["evidence_hits_gold"] for r in rs if r["evidence_hits_gold"] is not None]),
             avg_evidence_words=mean([r["evidence_words"] for r in rs]),
             avg_llm_calls=mean([r["llm_calls"] for r in rs if r["llm_calls"] is not None]),

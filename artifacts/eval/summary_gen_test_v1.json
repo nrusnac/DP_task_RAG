@@ -1,0 +1,51 @@
+{
+ "agent": {
+  "n": 82,
+  "errors": 0,
+  "pass_rate": 0.78,
+  "pass_rate_fact": 0.8,
+  "pass_rate_analysis": 0.766,
+  "faithful_rate": 0.78,
+  "abstain_rate": 0.207,
+  "evidence_has_gold": 0.848,
+  "avg_evidence_words": 940.207,
+  "avg_llm_calls": 3.463,
+  "avg_seconds": 29.08,
+  "routes": {
+   "simple": 69,
+   "complex": 13
+  }
+ },
+ "naive": {
+  "n": 83,
+  "errors": 0,
+  "pass_rate": 0.855,
+  "pass_rate_fact": 0.917,
+  "pass_rate_analysis": 0.809,
+  "faithful_rate": 0.723,
+  "abstain_rate": 0.229,
+  "evidence_has_gold": 0.866,
+  "avg_evidence_words": 2023.867,
+  "avg_llm_calls": 1.0,
+  "avg_seconds": 11.99,
+  "routes": {
+   "fixed": 83
+  }
+ },
+ "single_shot": {
+  "n": 83,
+  "errors": 0,
+  "pass_rate": 0.94,
+  "pass_rate_fact": 0.972,
+  "pass_rate_analysis": 0.915,
+  "faithful_rate": 0.735,
+  "abstain_rate": 0.181,
+  "evidence_has_gold": 0.94,
+  "avg_evidence_words": 2196.771,
+  "avg_llm_calls": 1.0,
+  "avg_seconds": 13.086,
+  "routes": {
+   "fixed": 83
+  }
+ }
+}
