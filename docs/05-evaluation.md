@@ -104,14 +104,18 @@ Each of the 18 agent failures has one of three causes (records: `artifacts/eval/
 | **Over-hedging** (the shared answer prompt) | 5, also failed by single-shot (all of its failures): draft SPA C-052; national security C-028, C-008, C-017; CFIUS declaration C-022 | Refusals to conclude: no FOCI instrument recommended, no finding that a mandatory filing applies, the NRO's status "not established" (general knowledge), no link drawn between two "Zhonghe Provincial" entities. 89–95% of every system's answers said "do not establish" somewhere | answer rules: commit to assessments and recommendations under "Analysis:"; general legal knowledge allowed there if labelled; "do not establish" only for a missing fact ([03](03-rag-techniques.md#9-grounded-generation)) |
 
 **The whole-chunk fix was checked on dev before the rerun**, with a replay of the simple route that needs no LLM
-(each dev question as one sub-question, round 0; key facts = the verbatim facts each QA item was built from):
+(each question as one sub-question, round 0; key facts = the verbatim facts each QA item was built from):
 
-| evidence passed to generation (dev, 82 labelled questions) | gold chunk in evidence | key facts in evidence | words |
-|---|---|---|---|
-| this branch's first version: keep ≥ τ_low, strips, cap 8 | 0.915 | 0.910 | 831 |
-| `main`: keep all, strips (+ up to 3 whole) | 0.927 | 0.925 | 917 |
-| top-5 whole chunks | 0.927 | 0.945 | 1,338 |
-| **top-8 whole chunks (= single-shot; now the agent)** | **0.963** | **0.972** | 2,124 |
+| evidence passed to generation | dev: gold chunk in evidence | dev: key facts in evidence | dev: words | test: key facts in evidence |
+|---|---|---|---|---|
+| this branch's first version: keep ≥ τ_low, strips, cap 8 | 0.915 | 0.910 | 831 | 0.833 |
+| `main`: keep all, strips (+ up to 3 whole) | 0.927 | 0.925 | 917 | 0.861 |
+| top-5 whole chunks | 0.927 | 0.945 | 1,338 | 0.912 |
+| **top-8 whole chunks (= single-shot; now the agent)** | **0.963** | **0.972** | 2,124 | **0.935** |
+
+The choice was made on the dev columns; the test column (98 labelled questions) only confirms it. The same replay
+shows why the last-round grader matters on new matters: 4.1% of answerable test questions score below τ_low
+(2.4% on dev), and 9.2% fall in the ambiguous band (3.7% on dev).
 
 **The abstention metric was wrong too.** It counted an answer as an abstention when a decline phrase appeared in its
 first 250 characters, so 48 of the 51 "abstentions" were partial answers that cited evidence ("Short answer: the

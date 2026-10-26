@@ -33,6 +33,12 @@ Each technique fixes a specific way naive RAG (fixed-size chunks → embed → t
   - Qwen3.5's hybrid Gated-DeltaNet attention is new on a T4 in fp16, so notebook 01 runs a 2-document smoke test first; the fallback is `Qwen/Qwen3-4B-Instruct-2507` (a standard transformer).
   - It runs in its own venv as a subprocess, so its torch can't break the notebook and its VRAM is released on exit. Every output row records the model, so contexts from two models are never mixed.
 - **Ablation:** `raw` vs. `header` vs. `ctx` index variants.
+- **Result on this branch:** Qwen3.5-4B wrote contexts for 93.8% of the 8,627 chunks (the rest keep the header only).
+  They did **not** beat the deterministic header on dev (hybrid + rerank(rrf): R@5 0.915 vs. 0.927, MRR 0.770 vs.
+  0.786; on test R@5 is tied at 0.867, MRR 0.690 vs. 0.703). By the rule fixed before measuring (ctx only if it
+  matches header on dev R@5 and MRR), the agent and the eval run on `header`; `ctx` stays in the retrieval ablation.
+  Likely reasons: the header already carries the title and section path, which is most of what a one-line context
+  adds for these documents, and 6% of chunks got no context.
 
 ## 3. Hybrid search + Reciprocal Rank Fusion
 - **Dense:** BGE-M3, 1024-dim, normalised, cosine via an exact numpy matmul (~1 ms at 8.6k vectors; an ANN index would only add approximation).
