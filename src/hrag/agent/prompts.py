@@ -30,8 +30,9 @@ PLAN_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["su
                                                "maxItems": 5}}}
 
 GRADE = """Retrieval evaluator (CRAG). For each numbered passage, decide whether it contains information that helps
-answer the question (directly, or as a necessary part of the answer). Be strict: same topic but different
-market/party/period is NOT relevant.
+answer the question (directly, or as a necessary part of the answer, e.g. the clause, figure, party position or
+document the question is about). Be strict about identity: same topic but a different deal, market, party or period
+is NOT relevant.
 
 Question: {question}
 
@@ -72,17 +73,25 @@ SUFFICIENCY_SCHEMA = {"type": "object", "additionalProperties": False, "required
                       "properties": {"sufficient": {"type": "boolean"},
                                      "missing": {"type": "array", "items": {"type": "string"}, "maxItems": 2}}}
 
-GENERATE_SYSTEM = ("You are a senior associate at a law firm (antitrust, M&A and regulatory matters). You answer "
-                   "strictly from the evidence provided from the client's data room. Precision matters more than length.")
-# The rules after the first four target the unfaithful answers seen in the eval (docs/05-evaluation.md, "Unfaithful-answer
-# patterns").
-GENERATE = """Answer the question using ONLY the numbered evidence below.
+GENERATE_SYSTEM = ("You are a senior associate at a law firm (antitrust, M&A and regulatory matters). You take the "
+                   "matter's facts strictly from the evidence provided from the client's data room, and you give a "
+                   "clear legal assessment. Precision matters more than length.")
+# Rules 3-5 keep answers from over-hedging: on the test split ~90% of answers said "do not establish" and every
+# single-shot failure was a refusal to conclude (docs/05-evaluation.md, "First test run"). The rules after them target
+# the unfaithful answers seen on main ("Unfaithful-answer patterns").
+GENERATE = """Answer the question using ONLY the numbered evidence below for facts about this matter.
 
 Rules
 - Cite every factual statement with its evidence number(s), e.g. [2] or [1][4].
 - Quote figures, dates, names and section numbers exactly as written in the evidence.
-- If the evidence does not establish something the question asks, say so explicitly ("The documents provided do not
-  establish ...") instead of guessing. Never present outside knowledge as coming from the documents.
+- Answer what is asked. When the question asks for an assessment, a recommendation, a classification or which option
+  applies, commit to a clear answer under "Analysis:", reasoning from the cited facts. Do not decline because no
+  document states the conclusion in so many words; connect facts across documents when they plainly relate, saying
+  how firm the link is.
+- General legal or regulatory knowledge (what an agency is, which rule or filing applies, typical timelines) may be
+  used under "Analysis:", labelled as general knowledge, never presented as coming from the documents.
+- Write "The documents provided do not establish ..." only for a specific fact the question asks about that the
+  evidence lacks, once per missing fact, and never guess that fact. It is not a substitute for answering.
 - Keep document facts and your own reasoning apart: facts carry citations; any legal inference, recommendation,
   characterization, comparison or conclusion goes in a section or sentence starting with "Analysis:" (no citation
   needed there).
@@ -94,7 +103,7 @@ Rules
 - Describe signatures, dates, execution status and markings exactly as shown: a blank signature line means the
   document is unsigned; a "DRAFT" marking means it is a draft.
 - Attribute each fact only to the document or party that the evidence shows stating it.
-- Answer exactly what is asked, concisely and structured (short paragraphs or bullets).
+- Be concise and structured (short paragraphs or bullets).
 - Before finishing, re-read the answer and delete any sentence that has no citation and is neither "Analysis:" nor
   an explicit "The documents provided do not establish ...".
 {insufficient}

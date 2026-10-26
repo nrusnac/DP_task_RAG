@@ -77,11 +77,9 @@ class Config:
     # calibration: each threshold may misclassify at most this share of its own class (tau_low: answerable questions
     # scoring below it; tau_high: unanswerable ones scoring above it), so one outlier can't move a threshold
     crag_tail: float = _env("CRAG_TAIL", 0.02)
-    strip_threshold: float = _env("STRIP_THRESHOLD", 0.50)
-    strips_per_subq: int = 12
     max_corrective_rounds: int = 2
     max_sufficiency_iters: int = 1
-    gen_strips_per_subq: int = 8   # evidence passed to generation: best strips per sub-question...
+    gen_chunks_per_subq: int = 8   # evidence passed to generation: whole chunks per sub-question (= single-shot's 8)...
     gen_max_evidence: int = 16     # ...and in total (round-robin across sub-questions)
 
     # LLM concurrency (measured ~1.1 calls/s at 8-way on Colab's 2 vCPUs)

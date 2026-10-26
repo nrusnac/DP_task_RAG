@@ -118,29 +118,54 @@ def test_crag_thresholds_ignore_single_outliers():
     assert lo == hi  # no overlap: the ambiguous band collapses
 
 
-def test_select_evidence_dedupes_and_caps():
-    whole = dict(chunk_id="A", doc="d", text="Alpha one is here.\nBeta two is here.", score=0.99)
-    subqs = [dict(strips=[whole, dict(chunk_id="B", doc="d", text="Bravo strip text.", score=0.6)]),
-             dict(strips=[dict(chunk_id="A", doc="d", text="Beta two is here.", score=0.7),
-                          dict(chunk_id="C", doc="d", text="Charlie strip text.", score=0.5)])]
+def test_select_evidence_round_robin_dedupes_and_caps():
+    c = lambda i: dict(chunk_id=i, doc="d", text=f"text {i}", score=0.9)  # noqa: E731
+    subqs = [dict(chunks=[c("A"), c("B"), c("C")]), dict(chunks=[c("A"), c("D")])]
     ev = graph._select_evidence(subqs, per_subq=8, max_total=16)
-    assert [e["chunk_id"] for e in ev] == ["A", "B", "C"]  # A's strip is inside the whole chunk A
-    ev = graph._select_evidence(subqs, per_subq=1, max_total=2)
-    assert [e["chunk_id"] for e in ev] == ["A"]  # sub-question 2's best strip is covered by A; cap 1 per sub-question
+    assert [e["chunk_id"] for e in ev] == ["A", "B", "C", "D"]  # A once; grouped by sub-question
+    ev = graph._select_evidence(subqs, per_subq=8, max_total=3)
+    assert [e["chunk_id"] for e in ev] == ["A", "B", "D"]       # round-robin: sub-question 2 keeps its best new chunk
 
 
 def test_terminal_statuses_and_forced_abstain():
     import asyncio
-    from hrag.eval.run_eval import ABSTAIN_MARKERS
+    from hrag.eval.run_eval import abstained
     r = CFG.max_corrective_rounds
-    st = {"subqs": [dict(q="a", status="ambiguous", rounds=r, strips=[{"chunk_id": "x", "text": "t"}]),
-                    dict(q="b", status="incorrect", rounds=r, strips=[{"chunk_id": "x", "text": "t"}]),
-                    dict(q="c", status="incorrect", rounds=r, strips=[])]}
-    out = asyncio.run(graph.refine(st))  # no "keep": no retriever needed
+    kept = [{"chunk_id": "x", "text": "t"}]
+    st = {"subqs": [dict(q="a", status="ambiguous", rounds=r, chunks=kept),
+                    dict(q="b", status="incorrect", rounds=r, chunks=kept),
+                    dict(q="c", status="incorrect", rounds=r, chunks=[])]}
+    out = asyncio.run(graph.refine(st))  # no "keep": nothing new to add
     assert [s["status"] for s in out["subqs"]] == ["weak", "weak", "insufficient"]
-    st = {"question": "q", "matter": "m", "log": [], "subqs": [dict(q="c", status="insufficient", strips=[])]}
+    st = {"question": "q", "matter": "m", "log": [], "subqs": [dict(q="c", status="insufficient", chunks=[])]}
     out = asyncio.run(graph.generate(st))  # all insufficient: answered without an LLM call
-    assert out["evidence"] == [] and any(m in out["answer"][:250].lower() for m in ABSTAIN_MARKERS)
+    assert out["evidence"] == [] and abstained(out["answer"])
+
+
+def test_low_score_goes_to_the_llm_grader_in_the_last_round(monkeypatch):
+    import asyncio
+    from hrag import llm
+    from hrag.retrieve.hybrid import Hit
+    graded = []
+
+    async def fake_complete(prompt, **kw):
+        graded.append(prompt)
+        return {"relevant": [1]}
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    hits = [Hit(0, "c0", 0.3, "", dict(doc_id="d", section="s", chunk_text="the answer"))]
+    sq = lambda rounds: dict(id=0, q="q", status="retrieved", rounds=rounds, best=0.3, hits=hits, chunks=[])  # noqa: E731
+    out = asyncio.run(graph.grade({"subqs": [sq(0)], "log": []}))
+    assert out["subqs"][0]["status"] == "incorrect" and not graded       # early round: rewrite, no LLM call
+    out = asyncio.run(graph.grade({"subqs": [sq(CFG.max_corrective_rounds)], "log": []}))
+    assert out["subqs"][0]["status"] == "ambiguous" and len(graded) == 1  # last round: the grader decides
+
+
+def test_abstained_needs_a_decline_without_citations():
+    from hrag.eval.run_eval import abstained, hedged
+    assert abstained("The documents provided do not establish the fee.")
+    assert not abstained("Short answer: the documents provided do not establish X. They show Y [2].")
+    assert hedged("They show Y [2]. The documents provided do not establish X.")
 
 
 def test_quota_errors_fail_fast(monkeypatch):

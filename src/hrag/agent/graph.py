@@ -35,10 +35,11 @@ class SubQ(TypedDict, total=False):
     hyde: str | None    # HyDE passage for the dense side after a corrective rewrite
     rounds: int         # corrective rounds used
     status: str         # pending | correct | ambiguous | incorrect | retry | done | weak | insufficient
-                        # terminal: done (graded correct), weak (strips but never graded correct), insufficient (none)
+                        # terminal: done (graded correct), weak (grader-kept chunks but never graded correct),
+                        # insufficient (nothing kept, confirmed by the LLM grader in the last round)
     best: float
     hits: list
-    strips: list
+    chunks: list        # kept evidence: whole chunks, in the order they were kept
 
 
 class State(TypedDict, total=False):
@@ -101,7 +102,7 @@ async def route(state: State) -> dict:
 
 
 def _new_subq(i: int, q: str) -> SubQ:
-    return SubQ(id=i, q=q, query=q, hyde=None, rounds=0, status="pending", best=0.0, hits=[], strips=[])
+    return SubQ(id=i, q=q, query=q, hyde=None, rounds=0, status="pending", best=0.0, hits=[], chunks=[])
 
 
 async def init_simple(state: State) -> dict:
@@ -134,21 +135,25 @@ async def retrieve(state: State) -> dict:
     return {"subqs": subqs}
 
 
-def _passages(hits, n=5, chars=900) -> str:
+def _passages(hits, n=5, chars=2500) -> str:  # ~a whole chunk: at 900 chars the grader missed clauses further down
     return "\n\n".join(f"[{i}] ({h.doc_label()})\n{h.meta['chunk_text'][:chars]}" for i, h in enumerate(hits[:n], 1))
 
 
 async def grade(state: State) -> dict:
-    """CRAG retrieval evaluator: reranker-score thresholds; Claude only for the ambiguous band."""
+    """CRAG retrieval evaluator: reranker-score thresholds; Claude for the ambiguous band AND for a last round that
+    scores below tau_low, so a sub-question is never given up on a score alone (on the test split, 3 answerable
+    questions were abstained on with the answer in the top hits at scores 0.47-0.71: long multi-part questions score
+    low against the passage that answers them)."""
     subqs = [dict(s) for s in state["subqs"]]
     log = list(state.get("log") or [])
     todo = []
     for s in subqs:
         if s["status"] != "retrieved":
             continue
-        if s["best"] >= CFG.crag_high:
-            s["status"], s["keep"] = "correct", [h for h in s["hits"] if h.score >= CFG.crag_low]
-        elif s["best"] < CFG.crag_low:
+        last = s["rounds"] >= CFG.max_corrective_rounds
+        if s["best"] >= CFG.crag_high:  # confident: keep all top hits, exactly what single-shot would pass on
+            s["status"], s["keep"] = "correct", s["hits"]
+        elif s["best"] < CFG.crag_low and not last:
             s["status"], s["keep"] = "incorrect", []
         else:
             todo.append(s)
@@ -170,22 +175,24 @@ async def grade(state: State) -> dict:
 
 
 async def refine(state: State) -> dict:
-    """Knowledge refinement for correct/ambiguous; decide retry vs. a terminal status for the rest. Only a sub-question
-    graded correct in some round ends 'done'; one that runs out of rounds with only grader-kept strips ends 'weak'."""
+    """Knowledge refinement at chunk level: keep the hits that passed the evaluator (all top hits when correct, the
+    grader's picks when ambiguous) as WHOLE chunks; decide retry vs. a terminal status for the rest. Only a
+    sub-question graded correct in some round ends 'done'; one that runs out of rounds with only grader-kept chunks
+    ends 'weak'. Sentence strips were dropped: they cut the clause or table context the answer needs (docs/04)."""
     subqs = [dict(s) for s in state["subqs"]]
     for s in subqs:
         st = s["status"]
         if st in ("correct", "ambiguous") and s.get("keep"):
-            new = retriever(state.get("variant", "ctx")).strips(s["q"], s["keep"], keep_whole_above=CFG.crag_high)
-            seen = {(x["chunk_id"], x["text"]) for x in s["strips"]}
-            s["strips"] = s["strips"] + [x for x in new if (x["chunk_id"], x["text"]) not in seen]
+            seen = {x["chunk_id"] for x in s["chunks"]}
+            s["chunks"] = s["chunks"] + [dict(chunk_id=h.chunk_id, doc=h.doc_label(), text=h.meta["chunk_text"],
+                                              score=h.score) for h in s["keep"] if h.chunk_id not in seen]
         can_retry = s["rounds"] < CFG.max_corrective_rounds
         if st == "correct":
             s["status"] = "done"
         elif st == "ambiguous":
             s["status"] = "retry" if can_retry else "weak"
         elif st == "incorrect":
-            s["status"] = "retry" if can_retry else ("weak" if s["strips"] else "insufficient")
+            s["status"] = "retry" if can_retry else ("weak" if s["chunks"] else "insufficient")
     return {"subqs": subqs}
 
 
@@ -203,7 +210,7 @@ async def rewrite(state: State) -> dict:
             raise o
         s["rounds"] += 1
         if isinstance(o, Exception):
-            s["status"] = "weak" if s["strips"] else "insufficient"
+            s["status"] = "weak" if s["chunks"] else "insufficient"
             continue
         s["query"], s["hyde"], s["status"] = o["keywords"], o["hyde"], "pending"
         log.append(f"rewrite[{s['id']}] round {s['rounds']}: '{o['keywords']}' + HyDE")
@@ -213,7 +220,7 @@ async def rewrite(state: State) -> dict:
 def _evidence_by_subq(subqs) -> str:
     parts = []
     for s in subqs:
-        body = "\n".join(f"  - {x['doc']}: {x['text'][:400]}" for x in s["strips"]) or "  (no evidence found)"
+        body = "\n".join(f"  - {x['doc']}: {x['text'][:500]}" for x in s["chunks"][:5]) or "  (no evidence found)"
         parts.append(f"Sub-question: {s['q']} [{s['status']}]\n{body}")
     return "\n\n".join(parts)
 
@@ -229,34 +236,18 @@ async def sufficiency(state: State) -> dict:
     return {"subqs": list(state["subqs"]) + new, "iteration": it, "log": _log(state, msg)}
 
 
-def _covered(small: str, big: str) -> bool:
-    """True if every line of `small` occurs in `big` (a strip, incl. a table header + row strip, of a whole chunk)."""
-    lines = [l.strip() for l in small.split("\n") if l.strip()]
-    return bool(lines) and len(small) < len(big) and all(l in big for l in lines)
-
-
 def _select_evidence(subqs, per_subq: int | None = None, max_total: int | None = None) -> list[dict]:
-    """Evidence passed to generation: the best `per_subq` strips of each sub-question, taken round-robin up to
-    `max_total`, minus strips already contained in a selected whole chunk. Less evidence = less to over-synthesize:
-    the agent's unfaithful answers came with ~1.7x the evidence of its faithful ones (13.5 vs 9.1 items). Grouped by
-    sub-question, each group in document order."""
-    per_subq = per_subq or CFG.gen_strips_per_subq
+    """Evidence passed to generation: up to `per_subq` kept chunks of each sub-question (in the order kept, i.e. the
+    retriever's order), taken round-robin across sub-questions up to `max_total`, each chunk once. A simple question
+    graded correct thus gets the same top-8 chunks as single-shot. Grouped by sub-question."""
+    per_subq = per_subq or CFG.gen_chunks_per_subq
     max_total = max_total or CFG.gen_max_evidence
-    queues = []
-    for si, s in enumerate(subqs):
-        ranked = sorted(enumerate(s["strips"]), key=lambda p: -p[1].get("score", 0.0))[:per_subq]
-        queues.append([(si, pos, x) for pos, x in ranked])
-    picked: list[tuple[int, int, dict]] = []
+    picked, seen = [], set()
     for rnd in range(per_subq):
-        for q in queues:
-            if rnd >= len(q) or len(picked) >= max_total:
-                continue
-            si, pos, x = q[rnd]
-            same = [p for p in picked if p[2]["chunk_id"] == x["chunk_id"]]
-            if any(p[2]["text"] == x["text"] or _covered(x["text"], p[2]["text"]) for p in same):
-                continue
-            picked = [p for p in picked if not (p[2]["chunk_id"] == x["chunk_id"] and _covered(p[2]["text"], x["text"]))]
-            picked.append((si, pos, x))
+        for si, s in enumerate(subqs):
+            if rnd < len(s["chunks"]) and len(picked) < max_total and s["chunks"][rnd]["chunk_id"] not in seen:
+                seen.add(s["chunks"][rnd]["chunk_id"])
+                picked.append((si, rnd, s["chunks"][rnd]))
     return [x for _, _, x in sorted(picked, key=lambda p: (p[0], p[1]))]
 
 
@@ -272,16 +263,15 @@ async def generate(state: State) -> dict:
                 "log": _log(state, "generate: all sub-questions insufficient → abstain (no LLM call)")}
     evidence = _select_evidence(subqs)
     ev_txt = "\n\n".join(f"[{i}] ({x['doc']})\n{x['text']}" for i, x in enumerate(evidence, 1)) or "(no evidence found)"
+    # 'weak' sub-questions get no warning: their chunks were judged relevant by the grader, and the earlier "indirect
+    # evidence" note made the model decline answers its evidence supported
     insuff = [s["q"] for s in subqs if s["status"] == "insufficient"]
-    weak = [s["q"] for s in subqs if s["status"] == "weak"]
     notes = ""
     if insuff:
-        notes += ("\nThe search found NO supporting evidence for these sub-questions; state that explicitly and do not "
-                  "answer them from other evidence or background knowledge:\n" + "\n".join(f"- {q}" for q in insuff) + "\n")
-    if weak:
-        notes += ("\nFor these sub-questions the search found only INDIRECT evidence (no passage was clearly relevant): "
-                  "use it only where it directly states the answer, otherwise say the documents provided do not "
-                  "establish it:\n" + "\n".join(f"- {q}" for q in weak) + "\n")
+        notes += ("\nThe search of the documents found NO evidence for these sub-questions: say the documents provided "
+                  "do not establish them and do not fill them from evidence about something else (general legal "
+                  "knowledge may still go under Analysis:, labelled as such):\n"
+                  + "\n".join(f"- {q}" for q in insuff) + "\n")
     answer = await llm.complete(P.GENERATE.format(insufficient=notes, matter=state["matter"],
                                                   question=state["question"], evidence=ev_txt),
                                 system=P.GENERATE_SYSTEM, model=CFG.strong_llm, purpose="generate", thinking=False)
@@ -348,7 +338,7 @@ async def answer(question: str, task_id: str | None = None, policy: str = "adapt
                    route_reason=out.get("route_reason"), answer=out.get("answer", ""), citations=out.get("citations", []),
                    evidence=out.get("evidence", []), log=out.get("log", []),
                    subqs=[dict(q=s["q"], status=s["status"], rounds=s["rounds"], best=round(s["best"], 3),
-                               n_strips=len(s["strips"])) for s in out.get("subqs", [])],
+                               n_chunks=len(s["chunks"])) for s in out.get("subqs", [])],
                    llm_calls=ctr["calls"], seconds=round(time.perf_counter() - t0, 1))
         tracing.set_attrs(sp, **{"output.value": res["answer"], "route": res["route"], "llm_calls": res["llm_calls"]})
         return res
