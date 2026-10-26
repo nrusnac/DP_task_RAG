@@ -19,7 +19,6 @@ If `setup()` is never called, every `tracing.span(...)` is a no-op, so the pipel
 | LangGraph nodes (`route`, `plan`, `retrieve`, `grade`, `refine`, `rewrite`, `sufficiency`, `generate`) | CHAIN | **auto** (`openinference-instrumentation-langchain`) | node input/output state |
 | `retrieve.hybrid` | RETRIEVER | manual | query, mode, scope, variant, retrieved documents with scores, latency |
 | `rerank` | RERANKER | manual | reranked documents with cross-encoder scores |
-| `crag.refine` | RERANKER | manual | strips in vs. kept, words in vs. kept |
 | `llm.<purpose>` (router, crag_grade, crag_rewrite, plan, sufficiency, generate, judge…) | LLM | **manual**: the Agent SDK runs Claude in a CLI subprocess that no instrumentor sees | model, backend, prompt, output, token counts, errors |
 | `eval.item` | CHAIN | manual | system, qid, so a failing eval item opens as its trace |
 

@@ -76,14 +76,57 @@ into six patterns (some answers show several). Each became a rule in the shared 
 | "signed" when the signature line was blank | C-020 |
 | a fact attributed to a source or party that doesn't state it | C-037, C-046, C-004 |
 
-Within the agent, unfaithful answers came with ~1.7× the evidence of faithful ones (13.5 vs 9.1 items), which is why
-the evidence passed to generation is now capped ([04](04-agentic-module.md)).
+Within the agent, unfaithful answers came with ~1.7× the evidence of faithful ones (13.5 vs 9.1 items). Capping the
+evidence on that basis backfired on the test split (next section), so the agent now passes whole chunks like
+single-shot does, and the rules carry the faithfulness work.
+
+## First test run: what went wrong
+The first run of this branch on the test split (header index) stopped at the session limit after 83 of the 126
+questions. The agent was the **most faithful** system but had the **lowest pass rate**. On the 82 questions every
+system answered, the agent never passed a question that single-shot failed: it lost 13 that single-shot passed, and
+both failed 5. Single-shot itself held steady (0.933 on dev on `main`, 0.94 here), so the agent's drop from 0.967 on
+`main` came from changes made on this branch.
+
+| system | pass | faithful | hedged¹ | evidence has gold | evidence words |
+|---|---|---|---|---|---|
+| naive | 0.855 | 0.723 | 0.892 | 0.866 | 2,024 |
+| single-shot | 0.94 | 0.735 | 0.892 | 0.94 | 2,197 |
+| agent | 0.78 | 0.78 | 0.951 | 0.848 | 940 |
+
+¹ share of answers that say somewhere that "the documents provided do not establish" something.
+
+Each of the 18 agent failures has one of three causes (records: `artifacts/eval/gen_test_v1.jsonl`):
+
+| Cause | Agent failures | What happened | Fix |
+|---|---|---|---|
+| **Evidence starvation** (introduced on this branch) | 10, all passed by single-shot: remedies C-003, C-017; ISS C-032; SPA markup C-043, C-045, C-046; seller's markup C-031; filing requirements C-009; CFIUS declaration C-021; closing conditions C-053 | Recalibrated τ_low (0.75; 0.09 on `main`) also decided which hits of a *correct* retrieval were kept, so most were dropped. The rest were cut into sentence strips and capped at 8: 940 words of evidence against single-shot's 2,197. The answers said so: "the cover letter is not among the evidence", "the SPA's Section 3.14 text itself is not included", "the Article VII text is not provided". Three of them (C-017, C-031, C-045) also ended `weak`, and the "indirect evidence" note made the generator decline | evidence is whole chunks; a correct retrieval keeps all top-8 hits (single-shot's evidence); the grader reads ~whole chunks (2,500 characters, was 900); no "indirect evidence" note |
+| **Abstained on a score alone** (introduced on this branch) | 3, all passed by single-shot: closing conditions C-030, C-051, C-055 | Top scores of 0.47–0.71 stayed below τ_low in every round, because the reranker scores the same top chunk against the same sub-question, so rewrites can't move the score. With every sub-question insufficient, the forced abstain fired without any LLM reading the passages | in the last round a score below τ_low goes to the Haiku grader; the agent abstains only if the grader keeps nothing |
+| **Over-hedging** (the shared answer prompt) | 5, also failed by single-shot (all of its failures): draft SPA C-052; national security C-028, C-008, C-017; CFIUS declaration C-022 | Refusals to conclude: no FOCI instrument recommended, no finding that a mandatory filing applies, the NRO's status "not established" (general knowledge), no link drawn between two "Zhonghe Provincial" entities. 89–95% of every system's answers said "do not establish" somewhere | answer rules: commit to assessments and recommendations under "Analysis:"; general legal knowledge allowed there if labelled; "do not establish" only for a missing fact ([03](03-rag-techniques.md#9-grounded-generation)) |
+
+**The whole-chunk fix was checked on dev before the rerun**, with a replay of the simple route that needs no LLM
+(each dev question as one sub-question, round 0; key facts = the verbatim facts each QA item was built from):
+
+| evidence passed to generation (dev, 82 labelled questions) | gold chunk in evidence | key facts in evidence | words |
+|---|---|---|---|
+| this branch's first version: keep ≥ τ_low, strips, cap 8 | 0.915 | 0.910 | 831 |
+| `main`: keep all, strips (+ up to 3 whole) | 0.927 | 0.925 | 917 |
+| top-5 whole chunks | 0.927 | 0.945 | 1,338 |
+| **top-8 whole chunks (= single-shot; now the agent)** | **0.963** | **0.972** | 2,124 |
+
+**The abstention metric was wrong too.** It counted an answer as an abstention when a decline phrase appeared in its
+first 250 characters, so 48 of the 51 "abstentions" were partial answers that cited evidence ("Short answer: the
+documents do not establish X. They show Y [2]"). An abstention now has to decline **and** cite nothing. By that rule
+the run had 3, the agent's forced abstains. `hedge_rate` tracks the over-hedging separately.
+
+**These 83 test questions were read to find the causes**, so they are no longer fully held out. The 43 test questions
+the run never reached are reported on their own as well (notebook cell after 5c).
 
 ## Results
 Run on a Colab T4 with `notebooks/02_demo_and_eval.ipynb`. The JSON outputs are in `artifacts/eval/`.
 
 > **Branch `agent-improvements`:** the tables below are the `main` results (dev questions, old corpus, Qwen2.5-3B
-> contexts). They will be replaced by the rerun on this branch (test split, 44-matter corpus, Qwen3.5-4B contexts).
+> contexts). The first test run on this branch is analysed above; the tables will be replaced by the rerun after its
+> fixes (test split, 44-matter corpus, Qwen3.5-4B contexts).
 
 <!-- RESULTS:START -->
 **Retrieval** (57 questions with silver labels; searched within the matter's data room unless marked corpus-wide; `foreign@5` = share of top-5 hits from other matters)

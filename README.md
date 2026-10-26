@@ -3,9 +3,11 @@
 RAG over the **`antitrust-competition`** practice area of [Harvey LAB](https://github.com/harveyai/harvey-labs/tree/main/tasks) plus 13 deal-regulatory matters (merger control / HSR / SPA, CFIUS): 44 matters, 318 documents (docx/xlsx/eml/pptx), ~3.05M tokens.
 
 > **Branch `agent-improvements`:** faithfulness and abstention fixes for the agent, a corpus +38%, Qwen3.5-4B contexts and
-> a held-out test split ([decision log #28–37](docs/07-decision-log.md#branch-agent-improvements)). The Results below are
-> still the `main` run (dev questions, 31-matter corpus) until the branch is rerun on Colab.
-- **Runs on a free Colab T4.** The GPU runs embeddings, reranking, CRAG strip scoring and the one-off contextualization LLM.
+> a held-out test split ([decision log #28–43](docs/07-decision-log.md#branch-agent-improvements)). The first test run
+> exposed three problems (evidence starvation, abstaining on scores alone, over-hedging), analysed in
+> [docs/05](docs/05-evaluation.md#first-test-run-what-went-wrong) and fixed. The Results below are still the `main` run
+> (dev questions, 31-matter corpus) until the fixed branch is rerun on Colab.
+- **Runs on a free Colab T4.** The GPU runs embeddings, reranking and the one-off contextualization LLM.
 - **Uses Claude through `claude_agent_sdk`** for reasoning, with the subscription token kept in Colab Secrets. An Anthropic-API fallback is included.
 
 | Notebook | What | Colab |
@@ -24,7 +26,7 @@ RAG over the **`antitrust-competition`** practice area of [Harvey LAB](https://g
 
 **Agentic module** ([docs/04](docs/04-agentic-module.md)): a LangGraph controller for the **retrieval step**.
 - **Adaptive-RAG** routes each query (direct / simple / complex).
-- **CRAG** grades the evidence with reranker scores (Claude only when the score is ambiguous), passes clearly relevant hits whole and reduces marginal ones to relevant sentence strips, rewrites failing queries with keywords + HyDE, and **abstains** instead of guessing.
+- **CRAG** grades the evidence with reranker scores (Claude when the score is ambiguous, and before giving up), keeps the relevant chunks whole, rewrites failing queries with keywords + HyDE, and **abstains** instead of guessing.
 - A sufficiency loop fills gaps on complex queries.
 - Every decision is logged and traced.
 
@@ -158,7 +160,7 @@ pip install -e ".[obs,dev]"
 python -m hrag.ingest.build                      # A1-A3: download subset, parse, chunk  -> artifacts/
 python -m hrag.index.build --variants raw header ctx   # A5 (needs artifacts/contexts.jsonl for ctx)
 python -m hrag.eval.run_eval retrieval           # retrieval ablations per split (no LLM)
-python -m hrag.eval.run_eval generation --systems naive single_shot agent --resume   # held-out test split
+python -m hrag.eval.run_eval generation --tag test_v2 --resume   # held-out test split: single-shot vs. agent
 python -c "from hrag.agent.graph import answer_sync as a; print(a('What is the post-merger HHI for flame retardants in the South Central region?', task_id='analyze-iss-antitrust-transaction-structure')['answer'])"
 pytest -q
 ```

@@ -60,8 +60,9 @@ Every chunk carries `task_id`. A question about a matter searches only that matt
 - Transformations are applied **only when the agent decides they are needed**: decomposition on complex queries, and rewrite + HyDE only after CRAG judges a retrieval incorrect or ambiguous.
 
 ## 9. Grounded generation
-- The generator sees only refined, numbered evidence strips.
-- It must cite each claim `[n]`, quote figures exactly, and write "The documents provided do not establish …" for sub-questions CRAG marked *insufficient* (and treat *weak* ones as indirect evidence, [04](04-agentic-module.md)).
+- The generator sees only the numbered evidence chunks that CRAG kept.
+- It must cite each claim `[n]`, quote figures exactly, and write "The documents provided do not establish …" for a fact the evidence lacks, including the sub-questions CRAG marked *insufficient* ([04](04-agentic-module.md)).
+- **It must still answer:** an assessment, recommendation or classification is given under "Analysis:", reasoning from the cited facts, and general legal knowledge may be used there when labelled as such. Added after the first test run, where ~90% of all systems' answers said "do not establish" and every single-shot failure was a refusal to conclude ([05](05-evaluation.md#first-test-run-what-went-wrong)).
 - Rules added on this branch, one per pattern seen in the unfaithful answers ([05](05-evaluation.md#unfaithful-answer-patterns)): no "only/all/none" claims the evidence doesn't make; inferences and characterizations under "Analysis:"; headings and bottom lines add no claims; proposals and redlines are not presented as agreed terms; signatures, dates and markings exactly as shown; facts attributed only to the document or party that states them; a final self-check that drops uncited sentences. The baselines use the same prompt, so the comparison stays fair.
-- The agent passes at most 8 strips per sub-question and 16 in total (round-robin, best first), and drops strips already contained in a whole chunk it passes.
+- The agent passes up to 8 whole chunks per sub-question and 16 in total (round-robin across sub-questions).
 - Citations map back to `chunk_id`s, so they are checkable (the eval measures them).
