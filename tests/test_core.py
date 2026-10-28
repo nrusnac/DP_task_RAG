@@ -279,31 +279,86 @@ def test_quota_errors_fail_fast(monkeypatch):
     assert len(calls) == 1  # no retries
 
 
-def test_resume_runs_only_missing_pairs(tmp_path):
+def test_resume_runs_only_missing_pairs_and_feeds_reuse(tmp_path):
     import asyncio
     import json
     from hrag import llm
-    from hrag.eval.run_eval import _load_done, _run_pairs
+    from hrag.eval.run_eval import _load_done, _run_items
     out = tmp_path / "gen.jsonl"
     items = [dict(qid=f"q{i}") for i in range(4)]
+    systems = ["single_shot", "agent"]
     seen = []
 
     def work_factory(quota_at):
-        async def work(it, system):
-            seen.append(it["qid"])
-            if it["qid"] == quota_at:
+        async def work(it, system, prev):
+            seen.append((it["qid"], system, sorted(prev)))
+            if (it["qid"], system) == quota_at:
                 raise llm.QuotaError("session limit")
             return dict(qid=it["qid"], system=system, verdict="pass")
         return work
 
-    pairs = [(it, "s") for it in items]
-    left = asyncio.run(_run_pairs(pairs, work_factory("q2"), out, concurrency=1, n_total=4, done=0))
-    assert left == 2 and [json.loads(l)["qid"] for l in open(out)] == ["q0", "q1"]
+    left = asyncio.run(_run_items(items, systems, work_factory(("q2", "agent")), out, {}, concurrency=1))
+    assert left == 3 and len(open(out).readlines()) == 5                     # q2/agent, q3/both still missing
     done = _load_done(out, resume=True)
     seen.clear()
-    todo = [(it, "s") for it in items if (it["qid"], "s") not in done]
-    assert asyncio.run(_run_pairs(todo, work_factory(None), out, 1, 4, len(done))) == 0
-    assert seen == ["q2", "q3"] and len(open(out).readlines()) == 4
+    assert asyncio.run(_run_items(items, systems, work_factory(None), out, done, 1)) == 0
+    # the resumed agent run on q2 still sees q2's single-shot record (for the answer reuse)
+    assert seen == [("q2", "agent", ["single_shot"]), ("q3", "single_shot", []), ("q3", "agent", ["single_shot"])]
+    assert len(open(out).readlines()) == 8 and all("error" not in json.loads(l) for l in open(out))
+
+
+def test_paired_stats():
+    from hrag.eval.stats import compare, mcnemar_exact
+    assert mcnemar_exact(2, 1) == 1.0 and abs(mcnemar_exact(10, 0) - 2 / 1024) < 1e-12
+    recs = []
+    for m in range(4):                       # 4 matters x 5 questions; the agent passes 2 more questions
+        for q in range(5):
+            qid = f"m{m}::q{q}"
+            recs.append(dict(qid=qid, system="single_shot", verdict="pass" if q < 3 else "fail", llm_calls=1))
+            recs.append(dict(qid=qid, system="agent", verdict="pass" if q < 3 or (q == 3 and m < 2) else "fail",
+                             llm_calls=3, reused=q == 0))
+    comp = compare(recs, n_boot=500)
+    s = comp["all"]["metrics"]["pass (rubric)"]
+    assert s["n"] == 20 and s["diff"] == 0.1 and (s["only_a"], s["only_b"]) == (2, 0)
+    assert s["ci95"][0] <= 0.1 <= s["ci95"][1]
+    assert comp["agent took its own path"]["n_questions"] == 16                # 4 reused answers left out
+
+
+def test_key_fact_recall():
+    from hrag.eval.run_eval import key_fact_recall
+    assert key_fact_recall("The HHI rises to 3552, a delta of 1,242.", ["3,552", "1242", "Section 7A"]) == 0.667
+    assert key_fact_recall("anything", []) is None
+
+
+def test_rejudge_majority_and_pairwise_order(tmp_path, monkeypatch):
+    import asyncio
+    import json
+    from hrag.eval import judge, run_eval
+    monkeypatch.setattr(run_eval, "EVAL_DIR", tmp_path)
+    rec = lambda q, s, v, ans, reused=False: dict(qid=q, task_id="t", system=s, kind="fact", verdict=v,  # noqa: E731
+                                                  answer=ans, reused=reused, evidence_ids=[])
+    lines = [rec("q1", "single_shot", "pass", "A1"), rec("q1", "agent", "fail", "B1"),
+             rec("q2", "single_shot", "pass", "A2"), rec("q2", "agent", "pass", "A2", reused=True)]
+    (tmp_path / "gen_t.jsonl").write_text("".join(json.dumps(r) + "\n" for r in lines))
+    items = {q: dict(qid=q, task_id="t", question="?", expected_answer="x") for q in ("q1", "q2")}
+
+    async def fake_judge(it, r):
+        return {"verdict": "pass"}
+
+    assert asyncio.run(run_eval.rejudge("t", items, "verdict", fake_judge, "pass")) == 0
+    rj = [json.loads(l) for l in open(tmp_path / "rejudge_t.jsonl")]
+    assert sorted((r["system"], r["majority"]) for r in rj) == [("agent", "pass"), ("single_shot", "pass")]
+    records, _ = run_eval.load_records("t")
+    assert {r["system"]: r.get("verdict_majority") for r in records if r["qid"] == "q1"} == \
+        {"single_shot": "pass", "agent": "pass"}
+
+    async def fake_pairwise(question, reference, first, second, evidence):
+        return {"winner": "1" if first == "B1" else "2", "reasoning": ""}     # always prefers the agent's answer
+
+    monkeypatch.setattr(judge, "judge_pairwise", fake_pairwise)
+    asyncio.run(run_eval.pairwise("t", items, lambda it: ""))
+    prefs = [json.loads(l) for l in open(tmp_path / "pairwise_t.jsonl")]
+    assert [(p["qid"], p["winner"]) for p in prefs] == [("q1", "agent")]    # q2 reused: identical answers
 
 
 def test_overmatched_facts_go_to_llm_labelling():
@@ -312,3 +367,20 @@ def test_overmatched_facts_go_to_llm_labelling():
                            text=[f"Acme Corp clause {i}" for i in range(10)]))
     item = {"key_facts": ["Acme Corp"]}
     assert len(match_chunks(item, df)) == 10 and silver_labels(item, df) == []  # too generic for a string label
+
+
+def test_bridge_candidates_link_two_documents():
+    import random
+    from hrag.eval.build_hard import bridge_candidates, entities
+    assert "Zhonghe Provincial Semiconductor Manufacturing Co" in entities(
+        "Senior Process Engineer, Zhonghe Provincial Semiconductor Manufacturing Co., Hefei")
+    assert "Zhonghe PSIC" in entities('Zhonghe Provincial State Investment Corp. ("Zhonghe PSIC") holds 19.5%')
+    df = pd.DataFrame(dict(
+        chunk_id=["a", "b", "c", "d"], doc_id=["bio", "lpa", "lpa", "memo"], section=["s"] * 4, kind=["para"] * 4,
+        text=["Dr. Lin Fang worked at Acme Widgets Ltd. in Hefei from 2011 to 2019 as process engineer.",
+              "Principal subsidiaries of the investor include Acme Widgets Ltd., a fabrication company.",
+              "Acme Widgets Ltd. supplies wafers to the fund's other holdings under long-term contracts.",
+              "Unrelated memo about filing fees and HSR thresholds."]))
+    cands = bridge_candidates(df, random.Random(0))
+    assert [c["entity"] for c in cands] == ["Acme Widgets Ltd"]
+    assert {r.doc_id for r in cands[0]["chunks"]} == {"bio", "lpa"}   # two different documents

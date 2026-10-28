@@ -1,13 +1,16 @@
 """C3-C5: retrieval ablations, CRAG threshold calibration, and generation eval (agent vs. baselines).
 
 qa.jsonl has two splits (docs/05-evaluation.md): `dev` (the 110 questions that shaped the design) and `test` (matters
-never used while building it). Calibration uses dev only; the generation eval defaults to test.
+never used while building it). Calibration uses dev only; the generation eval defaults to test. qa_hard.jsonl holds
+the hard sets (build_hard.py): two-step links, multi-document questions and unanswerable questions inside a matter.
 
     python -m hrag.eval.run_eval retrieval                       # no LLM calls: every retrieval configuration, per split
     python -m hrag.eval.run_eval calibrate                       # CRAG thresholds from dev rerank-score distributions
-    python -m hrag.eval.run_eval generation --tag test_v2 --resume          # whole test split: single_shot vs. agent
+    python -m hrag.eval.run_eval generation --tag test_v3 --resume          # whole test split: single_shot vs. agent
+    python -m hrag.eval.run_eval hard --tag hard_v1 --resume                # the hard sets
+    python -m hrag.eval.run_eval report --tags test_v3 hard_v1              # comparison tables, no LLM calls
     python -m hrag.eval.run_eval generation --n 20 --systems agent:simple agent:complex agent   # Adaptive-RAG ablation
-    python -m hrag.eval.run_eval negatives --n 40 --systems single_shot agent                   # unanswerable questions
+    python -m hrag.eval.run_eval negatives --n 40 --systems single_shot agent                   # cross-matter negatives
 
 Long runs stop cleanly at a subscription session limit (llm.QuotaError); rerun with --resume after the reset.
 """
@@ -166,6 +169,7 @@ def calibrate(variant: str | None = None, seed: int = 11, split: str = "dev") ->
 ABSTAIN_MARKERS = ("do not establish", "does not establish", "not found in", "no evidence", "do not contain",
                    "does not contain", "not addressed in")
 _CITATION = re.compile(r"\[\d+\]")
+HARD_KINDS = ("bridge", "aspect", "absent")
 
 
 def abstained(answer: str | None) -> bool:
@@ -181,7 +185,33 @@ def hedged(answer: str | None) -> bool:
     return any(m in (answer or "").lower() for m in ("do not establish", "does not establish"))
 
 
-async def _run_system(system: str, it: dict, variant: str) -> dict:
+def key_fact_recall(answer: str | None, facts: list[str] | None) -> float | None:
+    """Share of the item's verbatim key facts that appear in the answer (normalised as in the silver labels, so
+    "1,242" matches "1242"): a free, reproducible correctness signal. None when the item has no key facts."""
+    from .build_qa import _norm, _variants
+    facts = [f for f in (facts or []) if f and len(f.strip()) >= 2]
+    if not facts:
+        return None
+    a = _norm(answer or "")
+    a += " " + re.sub(r"(?<=\d),(?=\d{3})", "", a)
+    return round(sum(any(v in a for v in _variants(f)) for f in facts) / len(facts), 3)
+
+
+@lru_cache(maxsize=1)
+def _chunk_lookup() -> dict[str, dict]:
+    """chunk_id -> {chunk_id, doc, text}, labelled exactly as the systems show chunks to the generator."""
+    import pandas as pd
+    df = pd.read_parquet(CFG.artifacts_dir / "chunks.parquet", columns=["chunk_id", "doc_id", "section", "kind", "text"])
+    return {r.chunk_id: dict(chunk_id=r.chunk_id, doc=f"{r.doc_id} § {r.section or r.kind}", text=r.text)
+            for r in df.itertuples()}
+
+
+def passages(chunk_ids: list[str]) -> list[dict]:
+    lookup = _chunk_lookup()
+    return [lookup[c] for c in dict.fromkeys(chunk_ids) if c in lookup]
+
+
+async def _run_system(system: str, it: dict, variant: str, reuse: dict | None = None) -> dict:
     from ..agent import baseline
     from ..agent.graph import answer
     if system == "naive":
@@ -189,7 +219,7 @@ async def _run_system(system: str, it: dict, variant: str) -> dict:
     if system == "single_shot":
         return await baseline.single_shot(it["question"], it["task_id"], variant=variant)
     policy = system.split(":", 1)[1] if ":" in system else "adaptive"
-    return await answer(it["question"], task_id=it["task_id"], policy=policy, variant=variant)
+    return await answer(it["question"], task_id=it["task_id"], policy=policy, variant=variant, reuse=reuse)
 
 
 def _load_done(out_path: Path, resume: bool) -> dict[tuple[str, str], dict]:
@@ -209,85 +239,330 @@ def _load_done(out_path: Path, resume: bool) -> dict[tuple[str, str], dict]:
     return done
 
 
-async def _run_pairs(pairs, work, out_path: Path, concurrency: int, n_total: int, done: int) -> int:
-    """Run `work(it, system) -> record` over (item, system) pairs, appending each record to out_path. A QuotaError
-    stops scheduling new pairs and is NOT recorded, so a resumed run picks those pairs up. Returns #pairs left."""
-    sem, stop, n = asyncio.Semaphore(concurrency), asyncio.Event(), [done]
-    left = [len(pairs)]
+def _ordered(systems) -> list[str]:
+    """single_shot first: on each question the agent then runs with single-shot's answer available for reuse."""
+    return sorted(systems, key=lambda s: s != "single_shot")
 
-    async def one(it, system):
+
+async def _run_items(items: list[dict], systems: list[str], work, out_path: Path, done: dict,
+                     concurrency: int) -> int:
+    """Run each item through `systems` in order, `work(it, system, prev) -> record`, where prev holds this item's
+    earlier records by system (from this run or a resumed one). Each record is appended to out_path. A QuotaError stops
+    scheduling and is NOT recorded, so a resumed run picks the pair up. Returns #pairs left."""
+    sem, stop = asyncio.Semaphore(concurrency), asyncio.Event()
+    n_total = len(items) * len(systems)
+    n, left = [len(done)], [sum((it["qid"], s) not in done for it in items for s in systems)]
+
+    async def one(it):
+        async with sem:
+            prev = {}
+            for system in systems:
+                if stop.is_set():
+                    return
+                if (it["qid"], system) in done:
+                    prev[system] = done[(it["qid"], system)]
+                    continue
+                try:
+                    rec = await work(it, system, prev)
+                except llm.QuotaError as e:
+                    if not stop.is_set():
+                        print(f"STOPPED: {e} -- rerun with resume=True after the limit resets", flush=True)
+                    stop.set()
+                    return
+                except Exception as e:  # noqa: BLE001
+                    rec = dict(qid=it["qid"], system=system, error=repr(e)[:300])
+                prev[system] = rec
+                n[0] += 1
+                left[0] -= "error" not in rec
+                shown = next((rec[k] for k in ("verdict", "reference_verdict", "declined", "error") if k in rec), "")
+                print(f"[{n[0]}/{n_total}] {system} {it['qid']} -> {shown}{' (reused)' if rec.get('reused') else ''}",
+                      flush=True)
+                with open(out_path, "a") as f:
+                    f.write(json.dumps(rec, default=str) + "\n")
+
+    await asyncio.gather(*[one(it) for it in items])
+    return left[0]
+
+
+async def _append_all(jobs: list, out_path: Path, concurrency: int = 3) -> int:
+    """Run zero-argument coroutine functions, appending each returned record to out_path; a QuotaError stops
+    scheduling (rerun to continue), other errors are printed and retried on the next run. Returns #jobs left."""
+    sem, stop, left = asyncio.Semaphore(concurrency), asyncio.Event(), [len(jobs)]
+
+    async def one(job):
         async with sem:
             if stop.is_set():
                 return
             try:
-                rec = await work(it, system)
+                rec = await job()
             except llm.QuotaError as e:
                 if not stop.is_set():
-                    print(f"STOPPED: {e} -- rerun with resume=True after the limit resets", flush=True)
+                    print(f"STOPPED: {e} -- rerun after the limit resets", flush=True)
                 stop.set()
                 return
             except Exception as e:  # noqa: BLE001
-                rec = dict(qid=it["qid"], system=system, error=repr(e)[:300])
-            n[0] += 1
-            left[0] -= "error" not in rec
-            print(f"[{n[0]}/{n_total}] {system} {it['qid']} -> {rec.get('verdict', rec.get('declined', rec.get('error')))}",
-                  flush=True)
+                print("error:", repr(e)[:200], flush=True)
+                return
+            left[0] -= 1
             with open(out_path, "a") as f:
                 f.write(json.dumps(rec, default=str) + "\n")
 
-    await asyncio.gather(*[one(it, s) for it, s in pairs])
+    await asyncio.gather(*[one(j) for j in jobs])
     return left[0]
+
+
+# judged fields: when the agent reuses single-shot's answer it gets the same judgments
+JUDGED = ("verdict", "judge_reasoning", "claims", "n_claims", "claim_support", "material_errors", "faithful",
+          "unsupported", "reference_verdict", "reference_reasoning", "fact_coverage", "declined", "decline_reason")
+
+
+def _with_reused(rec: dict, ss: dict) -> dict:
+    """A reused answer IS single-shot's answer, so it gets single-shot's judgments; its cost still counts the generation
+    call the agent makes in production (reuse is an eval device, not a saving)."""
+    return rec | {k: ss[k] for k in JUDGED if k in ss} | dict(
+        llm_calls=(rec.get("llm_calls") or 0) + 1,
+        seconds=round((rec.get("seconds") or 0) + (ss.get("gen_seconds") or 0), 1))
+
+
+def _reuse(prev: dict) -> dict | None:
+    ss = prev.get("single_shot")
+    if ss and "error" not in ss and ss.get("evidence_ids"):
+        return dict(evidence_ids=ss["evidence_ids"], answer=ss["answer"])
+    return None
+
+
+def _record(it: dict, system: str, res: dict) -> dict:
+    ev_ids = [e["chunk_id"] for e in res["evidence"]]
+    gold = set(it.get("gold") or [])
+    cited = {c["chunk_id"] for c in res.get("citations", [])} or set(ev_ids)
+    return dict(qid=it["qid"], task_id=it["task_id"], system=system, kind=it["kind"], route=res.get("route"),
+                abstained=abstained(res["answer"]), hedged=hedged(res["answer"]),
+                key_fact_recall=key_fact_recall(res["answer"], it.get("key_facts")),
+                evidence_hits_gold=bool(gold & set(ev_ids)) if gold else None,
+                all_gold_in_evidence=gold <= set(ev_ids) if gold and it.get("split") == "hard" else None,
+                cited_gold=bool(gold & cited) if gold else None,
+                evidence_ids=ev_ids, n_evidence=len(ev_ids),
+                evidence_words=sum(len(e["text"].split()) for e in res["evidence"]),
+                llm_calls=res.get("llm_calls"), seconds=res.get("seconds"), gen_seconds=res.get("gen_seconds"),
+                reused=bool(res.get("reused")),
+                subqs=res.get("subqs"), log=res.get("log"), answer=res["answer"])
+
+
+async def _claims(res: dict) -> dict:
+    """Claim-level groundedness; a whole-answer decline makes no claims, so it is not sent to the judge."""
+    from .judge import judge_claims
+    if abstained(res["answer"]):
+        return dict(claims=[], n_claims=0, claim_support=None, material_errors=0, faithful=True, unsupported=[])
+    return await judge_claims(res["answer"], res["evidence"])
 
 
 async def generation(n: int | None = None, systems=("single_shot", "agent"), seed: int = 3, variant: str | None = None,
                      concurrency: int = 3, judge_faith: bool = True, qids: list[str] | None = None,
-                     tag: str | None = None, split: str | None = "test", resume: bool = False) -> dict:
-    """n=None: the whole split. With split="dev" and n=30 this is the 30-question set used on main."""
-    from .judge import judge_correctness, judge_faithfulness
+                     tag: str | None = None, split: str | None = "test", resume: bool = False,
+                     post: bool = True) -> dict:
+    """n=None: the whole split. With split="dev" and n=30 this is the 30-question set used on main.
+
+    Single-shot runs first on each question; the agent reuses its answer when its evidence is single-shot's, chunk
+    for chunk (docs/05, "Shared-path reuse"). Judges: Harvey rubric verdict + claim-level groundedness. post: once
+    every pair is done, discordant rubric verdicts are re-judged (majority of 3) and answers that differ get a
+    pairwise judgment; the comparison with confidence intervals is written to compare_<tag>.json."""
+    from .judge import judge_correctness
     variant = variant or available_variants()[-1]
     items = load_qa(split=split)
     random.Random(seed).shuffle(items)
     items = [i for i in items if i["qid"] in set(qids)] if qids else items[:n] if n else items
-    out_path = EVAL_DIR / f"gen_{tag or '_'.join(s.replace(':', '-') for s in systems)}.jsonl"
+    systems = _ordered(systems)
+    tag = tag or "_".join(s.replace(":", "-") for s in systems)
+    out_path = EVAL_DIR / f"gen_{tag}.jsonl"
     EVAL_DIR.mkdir(parents=True, exist_ok=True)
     done = _load_done(out_path, resume)
-    pairs = [(it, s) for it in items for s in systems if (it["qid"], s) not in done]
 
-    async def work(it, system):
+    async def work(it, system, prev):
         with tracing.span("eval.item", kind="CHAIN", **{"eval.system": system, "eval.qid": it["qid"],
                                                         "input.value": it["question"]}):
-            res = await _run_system(system, it, variant)
+            res = await _run_system(system, it, variant, _reuse(prev) if system.startswith("agent") else None)
+            rec = _record(it, system, res)
+            if rec["reused"]:
+                return _with_reused(rec, prev["single_shot"])
             corr = await judge_correctness(it, res["answer"])
-            faith = await judge_faithfulness(res["answer"], res["evidence"]) if judge_faith else {}
-            cited = {c["chunk_id"] for c in res.get("citations", [])} or {e["chunk_id"] for e in res["evidence"]}
-            return dict(qid=it["qid"], system=system, kind=it["kind"], route=res.get("route"),
-                        verdict=corr["verdict"], judge_reasoning=corr["reasoning"],
-                        faithful=faith.get("faithful"), unsupported=faith.get("unsupported"),
-                        abstained=abstained(res["answer"]), hedged=hedged(res["answer"]),
-                        evidence_hits_gold=bool(set(it["gold"]) & {e["chunk_id"] for e in res["evidence"]})
-                        if it["gold"] else None,
-                        cited_gold=bool(set(it["gold"]) & cited) if it["gold"] else None,
-                        n_evidence=len(res["evidence"]),
-                        evidence_words=sum(len(e["text"].split()) for e in res["evidence"]),
-                        llm_calls=res.get("llm_calls"), seconds=res.get("seconds"),
-                        subqs=res.get("subqs"), log=res.get("log"), answer=res["answer"])
+            rec.update(verdict=corr["verdict"], judge_reasoning=corr["reasoning"])
+            if judge_faith:
+                rec.update(await _claims(res))
+            return rec
 
-    print(f"{len(items)} questions x {len(systems)} systems: {len(done)} done earlier, {len(pairs)} to run", flush=True)
-    left = await _run_pairs(pairs, work, out_path, concurrency, len(items) * len(systems), len(done))
-    wanted = {(it["qid"], s) for it in items for s in systems}
-    records = [r for r in map(json.loads, open(out_path)) if (r["qid"], r["system"]) in wanted] \
-        if out_path.exists() else []
-    summary = summarize_generation(records)
-    (EVAL_DIR / f"summary_{out_path.stem}.json").write_text(json.dumps(summary, indent=1))
-    print(json.dumps(summary, indent=1))
+    todo = sum((it["qid"], s) not in done for it in items for s in systems)
+    print(f"{len(items)} questions x {len(systems)} systems: {len(done)} done earlier, {todo} to run", flush=True)
+    left = await _run_items(items, systems, work, out_path, done, concurrency)
     if left:
-        print(f"INCOMPLETE: {left} of {len(wanted)} pairs still missing -- rerun with resume=True", flush=True)
+        print(f"INCOMPLETE: {left} pairs still missing -- rerun with resume=True", flush=True)
+    elif post and {"agent", "single_shot"} <= set(systems):
+        by_qid = {it["qid"]: it for it in items}
+        await rejudge(tag, by_qid, "verdict", lambda it, r: judge_correctness(it, r["answer"]), "pass")
+        await pairwise(tag, by_qid, lambda it: "Reference answer (written from the matter's grading rubric; it may be "
+                                               f"imperfect): {it['expected_answer']}\n")
+    return _finish(tag, items, systems)
+
+
+def load_hard(path: Path | None = None) -> list[dict]:
+    path = path or EVAL_DIR / "qa_hard.jsonl"
+    return [json.loads(l) for l in open(path)] if path.exists() else []
+
+
+async def hard(kinds=HARD_KINDS, systems=("single_shot", "agent"), n: int | None = None, variant: str | None = None,
+               concurrency: int = 3, tag: str = "hard_v1", resume: bool = True, post: bool = True) -> dict:
+    """The hard sets (build_hard.py, docs/05 "Hard sets"): two-step links (bridge), questions needing one fact from each
+    of three documents (aspect), and questions the matter's documents cannot answer (absent). Gold passages and
+    expected answers are known by construction, so answerable items are judged against them (judge_reference) and
+    retrieval completeness is exact (all gold chunks in the evidence)."""
+    from .judge import judge_reference
+    variant = variant or available_variants()[-1]
+    items = [i for i in load_hard() if i["kind"] in kinds]
+    items = items[:n] if n else items
+    systems = _ordered(systems)
+    out_path = EVAL_DIR / f"gen_{tag}.jsonl"
+    EVAL_DIR.mkdir(parents=True, exist_ok=True)
+    done = _load_done(out_path, resume)
+
+    async def work(it, system, prev):
+        res = await _run_system(system, it, variant, _reuse(prev) if system.startswith("agent") else None)
+        rec = _record(it, system, res)
+        if rec["reused"]:
+            return _with_reused(rec, prev["single_shot"])
+        if it["kind"] == "absent":
+            j = await llm.complete(UNANSWERABLE_JUDGE.format(question=it["question"], answer=res["answer"]),
+                                   model=CFG.fast_llm, schema=UNANSWERABLE_SCHEMA, purpose="judge_unanswerable")
+            return rec | dict(declined=bool(j["declined"]), decline_reason=j["reason"])
+        rec.update(await judge_reference(it, res["answer"], passages(it["gold"])))
+        return rec | await _claims(res)
+
+    todo = sum((it["qid"], s) not in done for it in items for s in systems)
+    print(f"{len(items)} hard questions x {len(systems)} systems: {len(done)} done earlier, {todo} to run", flush=True)
+    left = await _run_items(items, systems, work, out_path, done, concurrency)
+    if left:
+        print(f"INCOMPLETE: {left} pairs still missing -- rerun with resume=True", flush=True)
+    elif post and {"agent", "single_shot"} <= set(systems):
+        by_qid = {it["qid"]: it for it in items if it["kind"] != "absent"}
+        await rejudge(tag, by_qid, "reference_verdict",
+                      lambda it, r: judge_reference(it, r["answer"], passages(it["gold"])), "correct")
+        await pairwise(tag, by_qid, lambda it: f"Reference answer: {it['expected_answer']}\n")
+    return _finish(tag, items, systems)
+
+
+# ------------------------------------------------------------------------------------------- post-passes
+async def rejudge(tag: str, items: dict[str, dict], field: str, judge, success: str, a: str = "agent",
+                  b: str = "single_shot", votes: int = 3) -> int:
+    """Where one system's `field` verdict is `success` and the other's is not, judge both answers again until each has
+    `votes` verdicts; the majority goes to rejudge_<tag>.jsonl and is merged as <field>_majority (a single judge flip
+    can no longer decide a comparison). Reused answers can't disagree. Returns #answers left (rerun to continue after
+    a session limit)."""
+    from .stats import by_question
+    path = EVAL_DIR / f"rejudge_{tag}.jsonl"
+    have = {(r["qid"], r["system"], r["field"]) for r in map(json.loads, open(path))} if path.exists() else set()
+    pairs = by_question([json.loads(l) for l in open(EVAL_DIR / f"gen_{tag}.jsonl")])
+    jobs = []
+    for q, d in pairs.items():
+        if q not in items or a not in d or b not in d or (d[a].get(field) == success) == (d[b].get(field) == success):
+            continue
+        for s in (a, b):
+            if (q, s, field) in have:
+                continue
+
+            async def job(q=q, s=s, r=d[s]):
+                extra = [(await judge(items[q], r))[field] for _ in range(votes - 1)]
+                vs = [r[field]] + extra
+                best = max(vs, key=lambda v: (vs.count(v), v == r[field]))  # ties keep the original verdict
+                return dict(qid=q, system=s, field=field, votes=vs, majority=best)
+            jobs.append(job)
+    print(f"re-judging {len(jobs)} answers of discordant pairs ({field})", flush=True)
+    return await _append_all(jobs, path)
+
+
+async def pairwise(tag: str, items: dict[str, dict], reference, a: str = "agent", b: str = "single_shot") -> int:
+    """One pairwise judgment per question where the agent did NOT reuse single-shot's answer (elsewhere the answers are
+    identical), shown in a seeded random order; written to pairwise_<tag>.jsonl. Returns #questions left."""
+    from .judge import judge_pairwise
+    from .stats import by_question
+    path = EVAL_DIR / f"pairwise_{tag}.jsonl"
+    have = {r["qid"] for r in map(json.loads, open(path))} if path.exists() else set()
+    pairs = by_question([json.loads(l) for l in open(EVAL_DIR / f"gen_{tag}.jsonl")])
+    jobs = []
+    for q, d in pairs.items():
+        if q not in items or q in have or a not in d or b not in d or d[a].get("reused") \
+                or d[a]["answer"] == d[b]["answer"]:
+            continue
+        agent_first = random.Random(f"{tag}:{q}").random() < 0.5
+        first, second = (d[a], d[b]) if agent_first else (d[b], d[a])
+
+        async def job(q=q, first=first, second=second, agent_first=agent_first):
+            ev = passages(first.get("evidence_ids", []) + second.get("evidence_ids", []))
+            j = await judge_pairwise(items[q]["question"], reference(items[q]), first["answer"], second["answer"], ev)
+            winner = {"1": first["system"], "2": second["system"]}.get(j["winner"], "tie")
+            return dict(qid=q, task_id=items[q]["task_id"], winner=winner, agent_first=agent_first,
+                        reasoning=j["reasoning"])
+        jobs.append(job)
+    print(f"pairwise judgments to run: {len(jobs)}", flush=True)
+    return await _append_all(jobs, path)
+
+
+# ------------------------------------------------------------------------------------------- results
+def load_records(tag: str) -> tuple[list[dict], list[dict]]:
+    """Records of gen_<tag>.jsonl with the re-judged majorities merged in, and the pairwise preferences."""
+    path = EVAL_DIR / f"gen_{tag}.jsonl"
+    records = [json.loads(l) for l in open(path)] if path.exists() else []
+    rj = EVAL_DIR / f"rejudge_{tag}.jsonl"
+    if rj.exists():
+        maj = {(r["qid"], r["system"], r["field"]): r["majority"] for r in map(json.loads, open(rj))}
+        for r in records:
+            for f in ("verdict", "reference_verdict"):
+                if (r["qid"], r["system"], f) in maj:
+                    r[f"{f}_majority"] = maj[(r["qid"], r["system"], f)]
+    pw = EVAL_DIR / f"pairwise_{tag}.jsonl"
+    prefs = [json.loads(l) for l in open(pw)] if pw.exists() else []
+    return records, prefs
+
+
+def compare_tag(tag: str, a: str = "agent", b: str = "single_shot") -> dict:
+    """Paired comparison of a run (stats.compare) on all questions, where the agent took its own path, per question
+    kind and per audit stratum of the rubric; written to compare_<tag>.json."""
+    from . import stats
+    records, prefs = load_records(tag)
+    audit = {i["qid"]: i.get("audit") for i in load_qa() + load_hard()}
+    subsets = {"all": lambda ra, rb: True, "agent took its own path": lambda ra, rb: not ra.get("reused")}
+    for k in sorted({r["kind"] for r in records if "kind" in r}):
+        subsets[f"kind: {k}"] = lambda ra, rb, k=k: ra["kind"] == k
+    if any(audit.get(r["qid"]) for r in records):
+        subsets["rubric not contradicted by the documents (audit)"] = \
+            lambda ra, rb: audit.get(ra["qid"]) != "contradicted"
+        for v in ("supported", "outside_knowledge", "not_determinable", "contradicted"):
+            subsets[f"audit: {v}"] = lambda ra, rb, v=v: audit.get(ra["qid"]) == v
+    comp = stats.compare(records, a, b, prefs=prefs, subsets=subsets)
+    (EVAL_DIR / f"compare_{tag}.json").write_text(json.dumps(comp, indent=1))
+    return comp
+
+
+def _finish(tag: str, items: list[dict], systems: list[str]) -> dict:
+    from . import stats
+    wanted = {(it["qid"], s) for it in items for s in systems}
+    records = [r for r in load_records(tag)[0] if (r["qid"], r["system"]) in wanted]
+    summary = summarize_generation(records)
+    (EVAL_DIR / f"summary_gen_{tag}.json").write_text(json.dumps(summary, indent=1))
+    print(json.dumps(summary, indent=1))
+    if {"agent", "single_shot"} <= set(systems):
+        print(stats.format_table(compare_tag(tag)))
     return summary
 
 
+def report(tags: list[str]) -> None:
+    """Print the comparison tables of finished runs (recomputed from the files: no LLM calls)."""
+    from . import stats
+    for tag in tags:
+        print(f"\n######## {tag}")
+        print(stats.format_table(compare_tag(tag)))
+
+
 UNANSWERABLE_JUDGE = """The question below was asked against a legal matter's data room that does NOT contain the
-answer (it belongs to a different matter). Did the answer correctly decline, i.e. state that the documents do not
-establish the requested facts, without asserting specific facts, figures or terms as the answer?
+answer (no document in it answers the question). Did the answer correctly decline, i.e. state that the documents do
+not establish the requested facts, without asserting specific facts, figures or terms as the answer?
 
 Question: {question}
 
@@ -302,7 +577,7 @@ async def negatives(n: int = 40, systems=("single_shot", "agent"), seed: int = 2
                     resume: bool = False) -> dict:
     """Unanswerable questions: each QA question is asked against ANOTHER matter's data room (same practice area when
     possible). A correct system declines; an incorrect one answers from look-alike evidence (a hallucination with
-    citations)."""
+    citations). The hard set's `absent` kind is the harder version: unanswerable inside the matter itself."""
     from ..agent.graph import _matters
     variant = variant or available_variants()[-1]
     rng = random.Random(seed)
@@ -310,12 +585,12 @@ async def negatives(n: int = 40, systems=("single_shot", "agent"), seed: int = 2
     rng.shuffle(items)
     tasks = sorted(_matters())
     items = [dict(i, task_id=other_matter(rng, i["task_id"], tasks)) for i in items[:n]]
+    systems = _ordered(systems)
     out_path = EVAL_DIR / f"unanswerable_{tag or variant}.jsonl"
     EVAL_DIR.mkdir(parents=True, exist_ok=True)
     done = _load_done(out_path, resume)
-    pairs = [(it, s) for it in items for s in systems if (it["qid"], s) not in done]
 
-    async def work(it, system):
+    async def work(it, system, prev):
         res = await _run_system(system, it, variant)
         j = await llm.complete(UNANSWERABLE_JUDGE.format(question=it["question"], answer=res["answer"]),
                                model=CFG.fast_llm, schema=UNANSWERABLE_SCHEMA, purpose="judge_unanswerable")
@@ -323,7 +598,7 @@ async def negatives(n: int = 40, systems=("single_shot", "agent"), seed: int = 2
                     reason=j["reason"], llm_calls=res.get("llm_calls"), route=res.get("route"),
                     log=res.get("log"), answer=res["answer"])
 
-    left = await _run_pairs(pairs, work, out_path, concurrency, len(items) * len(systems), len(done))
+    left = await _run_items(items, systems, work, out_path, done, concurrency)
     wanted = {(it["qid"], s) for it in items for s in systems}
     recs = [r for r in map(json.loads, open(out_path)) if (r["qid"], r["system"]) in wanted] if out_path.exists() else []
     out = summarize_negatives(recs, systems)
@@ -349,37 +624,53 @@ def summarize_negatives(recs: list[dict], systems) -> dict:
 
 
 def summarize_generation(records: list[dict]) -> dict:
+    """Per-system means. Keys appear only where they apply (rubric verdicts on the QA splits, reference verdicts and
+    decline rates on the hard sets); older records (Haiku faithfulness, no claims) still summarize."""
     out = {}
     for system in sorted({r["system"] for r in records}):
         rs = [r for r in records if r["system"] == system and "error" not in r]
         if not rs:
             continue
-        mean = lambda xs: round(float(np.mean(xs)), 3) if xs else None  # noqa: E731
-        out[system] = dict(
-            n=len(rs), errors=sum(1 for r in records if r["system"] == system and "error" in r),
-            pass_rate=mean([r["verdict"] == "pass" for r in rs]),
-            pass_rate_fact=mean([r["verdict"] == "pass" for r in rs if r["kind"] == "fact"]),
-            pass_rate_analysis=mean([r["verdict"] == "pass" for r in rs if r["kind"] == "analysis"]),
-            faithful_rate=mean([bool(r["faithful"]) for r in rs if r["faithful"] is not None]),
-            abstain_rate=mean([abstained(r["answer"]) for r in rs]),  # recomputed: older records used a looser rule
-            hedge_rate=mean([hedged(r["answer"]) for r in rs]),
-            evidence_has_gold=mean([r["evidence_hits_gold"] for r in rs if r["evidence_hits_gold"] is not None]),
-            avg_evidence_words=mean([r["evidence_words"] for r in rs]),
-            avg_llm_calls=mean([r["llm_calls"] for r in rs if r["llm_calls"] is not None]),
-            avg_seconds=mean([r["seconds"] for r in rs if r["seconds"] is not None]),
-            routes={k: sum(r["route"] == k for r in rs) for k in {r["route"] for r in rs}})
+        mean = lambda xs: round(float(np.mean(xs)), 3) if len(xs) else None  # noqa: E731
+        vals = lambda key: [r[key] for r in rs if r.get(key) is not None]  # noqa: E731
+        kinds = sorted({r["kind"] for r in rs})
+        s = dict(n=len(rs), errors=sum(1 for r in records if r["system"] == system and "error" in r))
+        voted = [r for r in rs if r.get("verdict")]
+        verdict = lambda r: (r.get("verdict_majority") or r["verdict"]) == "pass"  # noqa: E731
+        s["pass_rate"] = mean([verdict(r) for r in voted])
+        for k in kinds:
+            s[f"pass_rate_{k}"] = mean([verdict(r) for r in voted if r["kind"] == k])
+        refd = [r for r in rs if r.get("reference_verdict")]
+        correct = lambda r: (r.get("reference_verdict_majority") or r["reference_verdict"]) == "correct"  # noqa: E731
+        s["correct_rate"] = mean([correct(r) for r in refd])
+        for k in kinds:
+            s[f"correct_rate_{k}"] = mean([correct(r) for r in refd if r["kind"] == k])
+        s.update(fact_coverage=mean(vals("fact_coverage")), declined_rate=mean(vals("declined")),
+                 faithful_rate=mean([bool(r["faithful"]) for r in rs if r.get("faithful") is not None]),
+                 claim_support=mean(vals("claim_support")), material_errors=mean(vals("material_errors")),
+                 key_fact_recall=mean(vals("key_fact_recall")),
+                 abstain_rate=mean([abstained(r["answer"]) for r in rs]),  # recomputed: older records used a looser rule
+                 hedge_rate=mean([hedged(r["answer"]) for r in rs]),
+                 evidence_has_gold=mean(vals("evidence_hits_gold")),
+                 all_gold_in_evidence=mean(vals("all_gold_in_evidence")),
+                 reused_rate=mean([bool(r.get("reused")) for r in rs]) if system.startswith("agent") else None,
+                 avg_evidence_words=mean(vals("evidence_words")), avg_llm_calls=mean(vals("llm_calls")),
+                 avg_seconds=mean(vals("seconds")),
+                 routes={k: sum(r["route"] == k for r in rs) for k in {r["route"] for r in rs}})
+        out[system] = {k: v for k, v in s.items() if v is not None}
     return out
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("what", choices=["retrieval", "calibrate", "generation", "negatives"])
-    ap.add_argument("--n", type=int, default=None, help="questions (default: whole split; negatives: 40)")
+    ap.add_argument("what", choices=["retrieval", "calibrate", "generation", "hard", "negatives", "report"])
+    ap.add_argument("--n", type=int, default=None, help="questions (default: whole split / hard set; negatives: 40)")
     ap.add_argument("--systems", nargs="+", default=["single_shot", "agent"])
     ap.add_argument("--variant", default=None)
     ap.add_argument("--variants", nargs="+", default=None)
     ap.add_argument("--split", default=None, help="dev | test (calibrate: dev; generation/negatives: test)")
     ap.add_argument("--tag", default=None, help="output file tag")
+    ap.add_argument("--tags", nargs="+", default=None, help="report: tags of finished runs")
     ap.add_argument("--resume", action="store_true", help="continue an interrupted run instead of starting over")
     a = ap.parse_args()
     if a.what == "retrieval":
@@ -389,6 +680,10 @@ if __name__ == "__main__":
     elif a.what == "negatives":
         asyncio.run(negatives(a.n or 40, a.systems, variant=a.variant, split=a.split or "test", tag=a.tag,
                               resume=a.resume))
+    elif a.what == "hard":
+        asyncio.run(hard(systems=a.systems, n=a.n, variant=a.variant, tag=a.tag or "hard_v1", resume=a.resume))
+    elif a.what == "report":
+        report(a.tags or ["test_v3", "hard_v1"])
     else:
         asyncio.run(generation(a.n, a.systems, variant=a.variant, split=a.split or "test", tag=a.tag,
                                resume=a.resume))

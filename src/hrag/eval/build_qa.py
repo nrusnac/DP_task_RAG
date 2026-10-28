@@ -8,11 +8,17 @@ Harvey LAB has no retrieval gold labels (criteria[].sources is empty), so:
       those matches that actually answer the question (gold_source="llm"). Candidates come from string matching,
       never from our retriever, so the labels don't favour it.
 
+  C2b audit: one Sonnet call per item checks the expected answer against the matter's documents (passages found by
+      keyword search and by the key facts, never by our retriever): supported / contradicted / not_determinable /
+      outside_knowledge. Rubric criteria can describe issues the documents in this corpus don't have (two test items
+      fail every correct answer); the eval reports results per audit stratum.
+
 Splits: `dev` = the 110 questions that shaped the design; `test` = questions for matters never used before.
 
     python -m hrag.eval.build_qa build --tasks 10 --per-task 8   # (re)build from scratch: all items are dev
     python -m hrag.eval.build_qa extend --split test             # add questions for every matter not yet covered
     python -m hrag.eval.build_qa relabel --split dev             # recompute silver labels, keep the questions
+    python -m hrag.eval.build_qa audit --split test              # check expected answers against the documents
 """
 from __future__ import annotations
 
@@ -75,6 +81,32 @@ LABEL_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["r
                 "properties": {"relevant": {"type": "array", "items": {"type": "integer"}}}}
 
 
+AUDIT_PROMPT = """You are auditing one item of an evaluation set for a legal document-QA system. The item was written
+from a grading rubric for this matter; check it against the matter's own documents.
+
+Question: {question}
+Rubric criterion: {criterion}
+Expected answer: {expected_answer}
+
+Passages from the matter's documents (found by keyword search for the question and the expected answer, and by the
+item's key facts):
+{passages}
+
+Classify the expected answer:
+- "supported": the passages state it, or it follows from them directly;
+- "contradicted": a passage states something incompatible with it (quote that passage);
+- "not_determinable": the passages neither confirm nor contradict it (e.g. it says something is ABSENT from a
+  document and the passages do not show the whole provision, or the deciding passage may not be among them);
+- "outside_knowledge": it turns mainly on legal knowledge or judgment outside the documents (law, regulation,
+  agency practice), not on what the documents say.
+Give the deciding quote (empty if none) and a one-sentence note."""
+AUDIT_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["quote", "note", "verdict"],
+                "properties": {"quote": {"type": "string"}, "note": {"type": "string"},
+                               "verdict": {"type": "string", "enum": ["supported", "contradicted", "not_determinable",
+                                                                     "outside_knowledge"]}}}
+MAX_AUDIT_PASSAGES = 24
+
+
 def _norm(s: str) -> str:
     s = s.lower().replace("’", "'").replace("—", "-").replace("–", "-")
     return re.sub(r"\s+", " ", s).strip()
@@ -132,6 +164,35 @@ async def label(item: dict, task_chunks: pd.DataFrame) -> dict:
         return dict(gold=await llm_label(item, task_chunks, m), gold_source="llm", n_matches=len(m))
     gold = silver_labels(item, task_chunks)
     return dict(gold=gold, gold_source="string" if gold else None, n_matches=len(m))
+
+
+def lexical_top(task_chunks: pd.DataFrame, query: str, k: int = 10) -> list[str]:
+    """BM25 over one matter's chunks: a neutral candidate source for audits and the hard sets (lexical only, never the
+    system's own hybrid retriever and reranker)."""
+    import bm25s
+    from ..index.build import bm25_tokenize
+    toks = bm25_tokenize([query])
+    if not toks[0] or task_chunks.empty:
+        return []
+    bm = bm25s.BM25()
+    bm.index(bm25_tokenize((task_chunks.header + "\n" + task_chunks.text).tolist()), show_progress=False)
+    idx, sc = bm.retrieve(toks, k=min(k, len(task_chunks)), show_progress=False)
+    return [task_chunks.chunk_id.iat[int(i)] for i, v in zip(idx[0], sc[0]) if v > 0]
+
+
+async def audit_item(item: dict, task_chunks: pd.DataFrame) -> dict:
+    # deep keyword search: a clause can use other words than the rubric (e.g. "Conduct of Business Pending the
+    # Closing" for "interim operating covenants") and rank ~15th
+    cands = list(dict.fromkeys(list(item.get("gold") or [])
+                               + lexical_top(task_chunks, item["question"] + " " + item["expected_answer"], 20)
+                               + match_chunks(item, task_chunks)[:6]))
+    rows = task_chunks.set_index("chunk_id").loc[cands[:MAX_AUDIT_PASSAGES]]
+    passages = "\n\n".join(f"[{i}] ({r.header})\n{r.text[:3000]}" for i, r in enumerate(rows.itertuples(), 1))
+    out = await llm.complete(AUDIT_PROMPT.format(question=item["question"], expected_answer=item["expected_answer"],
+                                                 criterion=f"{item['criterion_title']}: {item['match_criteria']}",
+                                                 passages=passages or "(none found)"),
+                             model=CFG.strong_llm, schema=AUDIT_SCHEMA, purpose="qa_audit", max_tokens=1500)
+    return dict(audit=out["verdict"], audit_quote=out.get("quote", ""), audit_note=out.get("note", ""))
 
 
 def _gather_ok(res: list, what: str) -> list:
@@ -243,16 +304,45 @@ async def relabel(split: str | None = None) -> list[dict]:
     return out
 
 
+async def audit(split: str | None = "test", qids: list[str] | None = None) -> list[dict]:
+    """Audit the expected answers of one split's items (or of `qids`) against the documents; questions and labels are
+    kept, the verdict is stored as audit / audit_quote / audit_note."""
+    _, chunks = _load_inputs()
+    items = [dict(i, split=i.get("split", "dev")) for i in map(json.loads, open(QA_PATH))]
+    todo = [i for i in items if (i["qid"] in set(qids) if qids else split in (None, i["split"]))]
+    res = await asyncio.gather(*[audit_item(i, chunks[chunks.task_id == i["task_id"]]) for i in todo],
+                               return_exceptions=True)
+    new = {}
+    for i, r in zip(todo, res):
+        if isinstance(r, llm.QuotaError):
+            raise r
+        if isinstance(r, Exception):
+            print("audit error", i["qid"], repr(r)[:200])
+            continue
+        new[i["qid"]] = i | r
+    out = [new.get(i["qid"], i) for i in items]
+    _write(out)
+    audited = [i for i in out if i.get("audit")]
+    print(json.dumps({"audited": len(audited), "by_verdict": {v: sum(i["audit"] == v for i in audited)
+                                                               for v in sorted({i["audit"] for i in audited})},
+                      "llm": llm.STATS.snapshot()}, indent=1))
+    return [new[q] for q in new]
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("what", choices=["build", "extend", "relabel"])
+    ap.add_argument("what", choices=["build", "extend", "relabel", "audit"])
     ap.add_argument("--tasks", type=int, default=10)
     ap.add_argument("--per-task", type=int, default=8)
-    ap.add_argument("--split", default=None, help="extend: split of the new items (default test); relabel: only this split")
+    ap.add_argument("--split", default=None,
+                    help="extend: split of the new items (default test); relabel/audit: only this split (audit: test)")
+    ap.add_argument("--qids", nargs="+", default=None, help="audit: only these items")
     a = ap.parse_args()
     if a.what == "build":
         asyncio.run(build(a.tasks, a.per_task))
     elif a.what == "extend":
         asyncio.run(extend(a.per_task, split=a.split or "test"))
+    elif a.what == "audit":
+        asyncio.run(audit(a.split or "test", a.qids))
     else:
         asyncio.run(relabel(a.split))

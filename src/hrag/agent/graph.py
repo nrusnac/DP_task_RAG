@@ -115,7 +115,8 @@ async def init_simple(state: State) -> dict:
 
 
 def _first_look(hits) -> str:
-    return "\n".join(f"- {h.doc_label()}: {' '.join(h.meta['chunk_text'][:200].split())}" for h in hits) or "- (nothing)"
+    return "\n".join(f"- {h.doc_label()}: {' '.join(h.meta['chunk_text'][:200].split())}"
+                     for h in hits) or "- (nothing)"
 
 
 async def plan(state: State) -> dict:
