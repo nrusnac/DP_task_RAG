@@ -204,11 +204,15 @@ alone, and every leave-one-passage-out subset. The headline run refuses to start
 of each kind:
 
 <!-- HARD:START -->
-| kind | built from | accepted only if | tests |
-|---|---|---|---|
-| **bridge** | an entity (defined term, company or titled person) named in ≥ 2 documents but ≤ 6 chunks; the least-overlapping pair of chunks from two documents; the question must not name or alias the entity | neither passage alone answers it; removing either passage makes the answer incomplete; every fact is supported; the question doesn't give away the link | following a link learned mid-search |
-| **aspect** | a seed chunk and the most similar chunk of two other documents (TF-IDF cosine 0.12–0.45) | removing any one passage makes the answer incomplete; every fact is supported; all three together answer naturally | decomposition coverage |
+| kind | accepted | matters | build yield | built from | accepted only if | tests |
+|---|---:|---:|---:|---|---|---|
+| **bridge** | 25 / 25 | 19 | 25 / 102 (24.5%) | an entity (defined term, company or titled person) named in ≥ 2 documents but ≤ 6 chunks; the least-overlapping pair of chunks from two documents; the question must not name or alias the entity | neither passage alone answers it; removing either passage makes the answer incomplete; every fact is supported; the question doesn't give away the link | following a link learned mid-search |
+| **aspect** | 25 / 25 | 22 | 25 / 68 (36.8%) | a seed chunk and the most similar chunk of two other documents (TF-IDF cosine 0.12–0.45) | removing any one passage makes the answer incomplete; every fact is supported; all three together answer naturally | decomposition coverage |
 <!-- HARD:END -->
+
+Build yield is the number accepted by verifier v2 divided by candidates tried across all completion passes. The
+rejected-candidate log was introduced for the final completion pass, so it records those five rejected candidates;
+the earlier pass totals above come from the retained builder logs.
 
 The link behind C-022 (Zhonghe / Dr. Fang), which motivated the agent's link-finding step, is excluded from the bridge
 candidates. Answers are judged against the selected source passages and expected answer (`judge_reference`: correct /
