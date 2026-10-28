@@ -77,7 +77,8 @@ class Config:
     # calibration: each threshold may misclassify at most this share of its own class (tau_low: answerable questions
     # scoring below it; tau_high: unanswerable ones scoring above it), so one outlier can't move a threshold
     crag_tail: float = _env("CRAG_TAIL", 0.02)
-    max_corrective_rounds: int = 2
+    # one rewrite round, searching past the chunks already judged: on test_v2 a second round never changed a result
+    max_corrective_rounds: int = 1
     max_sufficiency_iters: int = 1
     gen_chunks_per_subq: int = 8   # evidence passed to generation: whole chunks per sub-question (= single-shot's 8)...
     gen_max_evidence: int = 16     # ...and in total (round-robin across sub-questions)

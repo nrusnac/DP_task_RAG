@@ -118,13 +118,105 @@ def test_crag_thresholds_ignore_single_outliers():
     assert lo == hi  # no overlap: the ambiguous band collapses
 
 
-def test_select_evidence_round_robin_dedupes_and_caps():
-    c = lambda i: dict(chunk_id=i, doc="d", text=f"text {i}", score=0.9)  # noqa: E731
-    subqs = [dict(chunks=[c("A"), c("B"), c("C")]), dict(chunks=[c("A"), c("D")])]
+def _chunk(i):
+    return dict(chunk_id=i, doc="d", text=f"text {i}", score=0.9)
+
+
+def test_select_evidence_question_first_then_round_robin():
+    subqs = [dict(chunks=[_chunk("A"), _chunk("B"), _chunk("C")]), dict(chunks=[_chunk("A"), _chunk("D")])]
     ev = graph._select_evidence(subqs, per_subq=8, max_total=16)
     assert [e["chunk_id"] for e in ev] == ["A", "B", "C", "D"]  # A once; grouped by sub-question
     ev = graph._select_evidence(subqs, per_subq=8, max_total=3)
-    assert [e["chunk_id"] for e in ev] == ["A", "B", "D"]       # round-robin: sub-question 2 keeps its best new chunk
+    assert [e["chunk_id"] for e in ev] == ["A", "B", "C"]       # the question's own top chunks come first
+    many = [dict(chunks=[_chunk(f"q{i}") for i in range(10)]), dict(chunks=[_chunk("K"), _chunk("L")]),
+            dict(chunks=[_chunk("M")])]
+    ev = [e["chunk_id"] for e in graph._select_evidence(many, per_subq=8, max_total=12, lead=8)]
+    # 8 lead chunks, then round-robin over the question's later chunks (a retry), K/L and M
+    assert ev == [f"q{i}" for i in range(10)] + ["K", "M"]
+
+
+def _hit(i, score=0.9):
+    from hrag.retrieve.hybrid import Hit
+    return Hit(i, f"c{i}", score, "", dict(doc_id="d", section="s", chunk_text=f"text {i}"))
+
+
+def test_grader_is_a_gate_in_round_0_and_a_filter_on_retry(monkeypatch):
+    import asyncio
+    from hrag import llm
+
+    async def fake_complete(prompt, **kw):
+        return {"relevant": [2]}
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    hits = [_hit(i) for i in range(8)]
+    mid = (CFG.crag_low + CFG.crag_high) / 2
+    sq = lambda rounds: dict(id=0, q="q", status="retrieved", rounds=rounds, best=mid, hits=hits, chunks=[],  # noqa: E731
+                             seen=[])
+    out = asyncio.run(graph.grade({"subqs": [sq(0)], "log": []}))["subqs"][0]
+    assert out["status"] == "ambiguous" and len(out["keep"]) == 8         # something relevant: keep all top hits
+    assert out["seen"] == [f"c{i}" for i in range(5)]                      # the 5 passages the grader judged
+    out = asyncio.run(graph.grade({"subqs": [sq(1)], "log": []}))["subqs"][0]
+    assert [h.chunk_id for h in out["keep"]] == ["c1"]                     # a retry adds only what the grader accepts
+
+
+def test_rewrite_round_searches_past_judged_chunks_only(monkeypatch):
+    import asyncio
+    calls = []
+
+    class FakeRetriever:
+        def search(self, query, **kw):
+            calls.append(kw.get("exclude"))
+            return [_hit(9)]
+
+    monkeypatch.setattr(graph, "retriever", lambda variant="ctx": FakeRetriever())
+    low = CFG.crag_low / 2
+    sq = dict(id=0, q="q", query="q", hyde=None, status="retrieved", rounds=0, best=low, hits=[_hit(0, low)],
+              chunks=[], seen=[])
+    out = asyncio.run(graph.grade({"subqs": [sq], "log": []}))["subqs"][0]
+    assert out["status"] == "incorrect" and out["seen"] == []              # score-only reject: not "seen"
+    st = {"subqs": [dict(sq, status="pending", seen=["c0", "c3"])]}
+    asyncio.run(graph.retrieve(st))
+    assert calls == [{"c0", "c3"}]
+
+
+def test_plan_searches_the_question_first(monkeypatch):
+    import asyncio
+    from hrag import llm
+    prompts = []
+
+    class FakeRetriever:
+        def search(self, query, **kw):
+            return [_hit(0, 0.95), _hit(1, 0.5)]
+
+    async def fake_complete(prompt, **kw):
+        prompts.append(prompt)
+        return {"subquestions": ["Who signed the side letter?", "the question"]}
+
+    monkeypatch.setattr(graph, "retriever", lambda variant="ctx": FakeRetriever())
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    out = asyncio.run(graph.plan({"question": "The question", "matter": "m", "task_id": "t", "log": []}))
+    s0, s1 = out["subqs"]                                                  # a copy of the question is dropped
+    assert s0["q"] == "The question" and s0["status"] == "retrieved" and s0["best"] == 0.95
+    assert s1["id"] == 1 and s1["status"] == "pending"
+    assert "d § s: text 0" in prompts[0]                                   # the planner sees the first search
+
+
+def test_generate_reuses_single_shot_answer_only_for_identical_evidence(monkeypatch):
+    import asyncio
+    from hrag import llm
+    calls = []
+
+    async def fake_complete(prompt, **kw):
+        calls.append(prompt)
+        return "fresh answer [1]"
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    st = {"question": "q", "matter": "m", "log": [],
+          "subqs": [dict(q="q", status="done", chunks=[_chunk("A"), _chunk("B")])]}
+    out = asyncio.run(graph.generate(dict(st, reuse={"evidence_ids": ["A", "B"], "answer": "ss answer [2]"})))
+    assert out["reused"] and out["answer"] == "ss answer [2]" and not calls
+    out = asyncio.run(graph.generate(dict(st, reuse={"evidence_ids": ["B", "A"], "answer": "ss answer [2]"})))
+    assert not out["reused"] and out["answer"] == "fresh answer [1]" and len(calls) == 1
 
 
 def test_terminal_statuses_and_forced_abstain():

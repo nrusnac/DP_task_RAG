@@ -7,6 +7,8 @@
                                      │                         │                └─▶ generate ─▶ END
                                      └─────────────────────────┴─▶ generate ─▶ END
 
+On both routes sub-question 0 is the question itself (on the complex route it is searched before planning, and its
+hits ground the plan), so the agent's evidence contains single-shot's whenever that search is usable.
 Every decision (route, CRAG verdict, rewrite, sufficiency) is recorded in state["log"] and traced as a span.
 See docs/04-agentic-module.md for the rationale.
 """
@@ -40,6 +42,7 @@ class SubQ(TypedDict, total=False):
     best: float
     hits: list
     chunks: list        # kept evidence: whole chunks, in the order they were kept
+    seen: list          # chunk ids the LLM grader judged or that were kept: a rewrite round searches past them
 
 
 class State(TypedDict, total=False):
@@ -48,6 +51,7 @@ class State(TypedDict, total=False):
     matter: str
     policy: str          # adaptive | simple | complex (forced routes, for the ablation)
     variant: str         # index variant: raw | header | ctx (LangGraph drops undeclared keys)
+    reuse: dict | None   # eval only: single-shot's {evidence_ids, answer} for the same question (see generate)
     route: str
     route_reason: str
     subqs: list[SubQ]
@@ -55,6 +59,7 @@ class State(TypedDict, total=False):
     answer: str
     evidence: list
     citations: list
+    reused: bool
     log: list[str]
 
 
@@ -102,23 +107,32 @@ async def route(state: State) -> dict:
 
 
 def _new_subq(i: int, q: str) -> SubQ:
-    return SubQ(id=i, q=q, query=q, hyde=None, rounds=0, status="pending", best=0.0, hits=[], chunks=[])
+    return SubQ(id=i, q=q, query=q, hyde=None, rounds=0, status="pending", best=0.0, hits=[], chunks=[], seen=[])
 
 
 async def init_simple(state: State) -> dict:
     return {"subqs": [_new_subq(0, state["question"])], "iteration": 0}
 
 
+def _first_look(hits) -> str:
+    return "\n".join(f"- {h.doc_label()}: {' '.join(h.meta['chunk_text'][:200].split())}" for h in hits) or "- (nothing)"
+
+
 async def plan(state: State) -> dict:
-    prev = state.get("subqs") or []
-    gaps = ""
-    if prev:
-        gaps = "\nAlready searched (do not repeat): " + "; ".join(s["q"] for s in prev)
-    out = await llm.complete(P.PLAN.format(matter=state["matter"], question=state["question"], gaps=gaps),
+    """Sub-question 0 is the question itself, searched before planning (retrieval only, no LLM call). Its hits show the
+    planner what this data room holds, so the plan uses the matter's names and documents; and its top chunks go to
+    generation first (_select_evidence). On test_v2 the planner, writing blind, produced textbook sub-questions and
+    never searched the question, and lost a question single-shot passed (docs/05, "Second test run")."""
+    question = state["question"]
+    s0 = _new_subq(0, question)
+    hits = retriever(state.get("variant", "ctx")).search(question, task_id=state.get("task_id"))
+    s0.update(hits=hits, best=max((h.score for h in hits), default=0.0), status="retrieved")
+    out = await llm.complete(P.PLAN.format(matter=state["matter"], question=question, found=_first_look(hits)),
                              system=P.SYSTEM, model=CFG.strong_llm, schema=P.PLAN_SCHEMA, purpose="plan")
-    subs = [_new_subq(len(prev) + i, q) for i, q in enumerate(out["subquestions"][:5])]
-    return {"subqs": prev + subs, "iteration": state.get("iteration", 0),
-            "log": _log(state, "plan: " + " | ".join(s["q"] for s in subs))}
+    qs = [q for q in out["subquestions"] if q.strip().lower() != question.strip().lower()][:4]
+    subs = [_new_subq(i, q) for i, q in enumerate(qs, 1)]
+    return {"subqs": [s0] + subs, "iteration": state.get("iteration", 0),
+            "log": _log(state, "plan: (the question itself) | " + " | ".join(s["q"] for s in subs))}
 
 
 async def retrieve(state: State) -> dict:
@@ -127,8 +141,11 @@ async def retrieve(state: State) -> dict:
     for s in subqs:
         if s["status"] != "pending":
             continue
-        # BM25 gets the (rewritten) keywords; the dense side and the reranker get the sub-question itself
-        hits = R.search(s["query"], task_id=state.get("task_id"), dense_query=s.get("hyde"), question=s["q"])
+        # BM25 gets the (rewritten) keywords; the dense side and the reranker get the sub-question itself. A rewrite
+        # round searches past the chunks already judged or kept, to find NEW evidence: with the same chunks back, 27 of
+        # 33 retried sub-questions on test_v2 got the identical best score in every round
+        hits = R.search(s["query"], task_id=state.get("task_id"), dense_query=s.get("hyde"), question=s["q"],
+                        exclude=set(s.get("seen") or []))
         s["hits"] = hits
         s["best"] = max((h.score for h in hits), default=0.0)  # with rank fusion, hits[0] isn't always the max
         s["status"] = "retrieved"
@@ -143,7 +160,11 @@ async def grade(state: State) -> dict:
     """CRAG retrieval evaluator: reranker-score thresholds; Claude for the ambiguous band AND for a last round that
     scores below tau_low, so a sub-question is never given up on a score alone (on the test split, 3 answerable
     questions were abstained on with the answer in the top hits at scores 0.47-0.71: long multi-part questions score
-    low against the passage that answers them)."""
+    low against the passage that answers them).
+
+    In round 0 the grader is a gate, not a filter: when it finds anything relevant, the sub-question keeps all its top
+    hits, as when it is confident (keeping only the grader's picks left the agent with less evidence than single-shot,
+    e.g. 481 vs 1,835 words). A rewrite round sees only new chunks and adds just the ones the grader accepts."""
     subqs = [dict(s) for s in state["subqs"]]
     log = list(state.get("log") or [])
     todo = []
@@ -151,7 +172,7 @@ async def grade(state: State) -> dict:
         if s["status"] != "retrieved":
             continue
         last = s["rounds"] >= CFG.max_corrective_rounds
-        if s["best"] >= CFG.crag_high:  # confident: keep all top hits, exactly what single-shot would pass on
+        if s["rounds"] == 0 and s["best"] >= CFG.crag_high:  # confident: keep all top hits, as single-shot does
             s["status"], s["keep"] = "correct", s["hits"]
         elif s["best"] < CFG.crag_low and not last:
             s["status"], s["keep"] = "incorrect", []
@@ -165,27 +186,35 @@ async def grade(state: State) -> dict:
             if isinstance(o, llm.QuotaError):
                 raise o
             rel = [] if isinstance(o, Exception) else [i for i in o.get("relevant", []) if 1 <= i <= len(s["hits"][:5])]
-            s["keep"] = [s["hits"][i - 1] for i in rel]
-            s["status"] = "ambiguous" if s["keep"] else "incorrect"
+            s["seen"] = list(dict.fromkeys((s.get("seen") or []) + [h.chunk_id for h in s["hits"][:5]]))
+            if not rel:
+                s["status"], s["keep"] = "incorrect", []
+            elif s["rounds"] == 0:
+                s["status"], s["keep"] = "ambiguous", s["hits"]
+            else:
+                s["status"] = "correct" if s["best"] >= CFG.crag_high else "ambiguous"
+                s["keep"] = [s["hits"][i - 1] for i in rel]
     for s in subqs:
         if s["status"] in ("correct", "ambiguous", "incorrect") and s.get("_logged_round") != s["rounds"]:
-            log.append(f"crag[{s['id']}] round {s['rounds']}: {s['status']} (best rerank {s['best']:.3f})")
+            log.append(f"crag[{s['id']}] round {s['rounds']}: {s['status']} (best rerank {s['best']:.3f}"
+                       f"{', new chunks only' if s['rounds'] else ''})")
             s["_logged_round"] = s["rounds"]
     return {"subqs": subqs, "log": log}
 
 
 async def refine(state: State) -> dict:
-    """Knowledge refinement at chunk level: keep the hits that passed the evaluator (all top hits when correct, the
-    grader's picks when ambiguous) as WHOLE chunks; decide retry vs. a terminal status for the rest. Only a
-    sub-question graded correct in some round ends 'done'; one that runs out of rounds with only grader-kept chunks
-    ends 'weak'. Sentence strips were dropped: they cut the clause or table context the answer needs (docs/04)."""
+    """Knowledge refinement at chunk level: keep the hits that passed the evaluator as WHOLE chunks (see grade); decide
+    retry vs. a terminal status for the rest. Only a sub-question graded correct in some round ends 'done'; one that
+    runs out of rounds with kept chunks but never graded correct ends 'weak'. Sentence strips were dropped: they cut
+    the clause or table context the answer needs (docs/04)."""
     subqs = [dict(s) for s in state["subqs"]]
     for s in subqs:
         st = s["status"]
         if st in ("correct", "ambiguous") and s.get("keep"):
-            seen = {x["chunk_id"] for x in s["chunks"]}
+            have = {x["chunk_id"] for x in s["chunks"]}
             s["chunks"] = s["chunks"] + [dict(chunk_id=h.chunk_id, doc=h.doc_label(), text=h.meta["chunk_text"],
-                                              score=h.score) for h in s["keep"] if h.chunk_id not in seen]
+                                              score=h.score) for h in s["keep"] if h.chunk_id not in have]
+            s["seen"] = list(dict.fromkeys((s.get("seen") or []) + [x["chunk_id"] for x in s["chunks"]]))
         can_retry = s["rounds"] < CFG.max_corrective_rounds
         if st == "correct":
             s["status"] = "done"
@@ -217,18 +246,21 @@ async def rewrite(state: State) -> dict:
     return {"subqs": subqs, "log": log}
 
 
-def _evidence_by_subq(subqs) -> str:
+def _evidence_by_subq(subqs, n: int = 4, chars: int = 1200) -> str:
     parts = []
     for s in subqs:
-        body = "\n".join(f"  - {x['doc']}: {x['text'][:500]}" for x in s["chunks"][:5]) or "  (no evidence found)"
+        body = "\n".join(f"  - {x['doc']}: {x['text'][:chars]}" for x in s["chunks"][:n]) or "  (no evidence found)"
         parts.append(f"Sub-question: {s['q']} [{s['status']}]\n{body}")
     return "\n\n".join(parts)
 
 
 async def sufficiency(state: State) -> dict:
+    """Missing parts AND unstated links (an entity named in one passage whose relation to another is needed). Sonnet
+    with ~1,200 characters per chunk: on test_v2, Haiku with 500-character excerpts called the evidence sufficient
+    although the link the answer turned on (a nominee's former employer -> a fund investor) was never searched."""
     it = state.get("iteration", 0) + 1
     out = await llm.complete(P.SUFFICIENCY.format(question=state["question"], evidence=_evidence_by_subq(state["subqs"])),
-                             system=P.SYSTEM, model=CFG.fast_llm, schema=P.SUFFICIENCY_SCHEMA, purpose="sufficiency")
+                             system=P.SYSTEM, model=CFG.strong_llm, schema=P.SUFFICIENCY_SCHEMA, purpose="sufficiency")
     missing = [] if out.get("sufficient") else out.get("missing", [])[:2]
     known = {s["q"].lower() for s in state["subqs"]}
     new = [_new_subq(len(state["subqs"]) + i, q) for i, q in enumerate(m for m in missing if m.lower() not in known)]
@@ -236,18 +268,32 @@ async def sufficiency(state: State) -> dict:
     return {"subqs": list(state["subqs"]) + new, "iteration": it, "log": _log(state, msg)}
 
 
-def _select_evidence(subqs, per_subq: int | None = None, max_total: int | None = None) -> list[dict]:
-    """Evidence passed to generation: up to `per_subq` kept chunks of each sub-question (in the order kept, i.e. the
-    retriever's order), taken round-robin across sub-questions up to `max_total`, each chunk once. A simple question
-    graded correct thus gets the same top-8 chunks as single-shot. Grouped by sub-question."""
+def _select_evidence(subqs, per_subq: int | None = None, max_total: int | None = None,
+                     lead: int | None = None) -> list[dict]:
+    """Evidence passed to generation, grouped by sub-question, each chunk once. Sub-question 0 is the question itself
+    on both routes: its first `lead` kept chunks (= single-shot's top 8) come first, so the agent's evidence contains
+    single-shot's whenever that search is usable. Then up to `per_subq` more chunks of each sub-question (sub-question
+    0's later chunks, from a retry, included) are taken round-robin in the order kept, up to `max_total`."""
     per_subq = per_subq or CFG.gen_chunks_per_subq
     max_total = max_total or CFG.gen_max_evidence
+    lead = CFG.rerank_top if lead is None else lead
     picked, seen = [], set()
+
+    def take(si: int, rank: int, x: dict) -> None:
+        if len(picked) < max_total and x["chunk_id"] not in seen:
+            seen.add(x["chunk_id"])
+            picked.append((si, rank, x))
+
+    if not subqs:
+        return []
+    for rank, x in enumerate(subqs[0]["chunks"][:lead]):
+        take(0, rank, x)
+    queues = [(0, lead, subqs[0]["chunks"][lead:lead + per_subq])] + \
+             [(si, 0, s["chunks"][:per_subq]) for si, s in enumerate(subqs[1:], 1)]
     for rnd in range(per_subq):
-        for si, s in enumerate(subqs):
-            if rnd < len(s["chunks"]) and len(picked) < max_total and s["chunks"][rnd]["chunk_id"] not in seen:
-                seen.add(s["chunks"][rnd]["chunk_id"])
-                picked.append((si, rnd, s["chunks"][rnd]))
+        for si, offset, q in queues:
+            if rnd < len(q):
+                take(si, offset + rnd, q[rnd])
     return [x for _, _, x in sorted(picked, key=lambda p: (p[0], p[1]))]
 
 
@@ -272,12 +318,24 @@ async def generate(state: State) -> dict:
                   "do not establish them and do not fill them from evidence about something else (general legal "
                   "knowledge may still go under Analysis:, labelled as such):\n"
                   + "\n".join(f"- {q}" for q in insuff) + "\n")
-    answer = await llm.complete(P.GENERATE.format(insufficient=notes, matter=state["matter"],
-                                                  question=state["question"], evidence=ev_txt),
-                                system=P.GENERATE_SYSTEM, model=CFG.strong_llm, purpose="generate", thinking=False)
+    # Eval only (run_eval, docs/05 "Shared-path reuse"): when the evidence is single-shot's, chunk for chunk, and no note
+    # is added, the generation prompt is byte-identical to single-shot's, so its answer is a sample of exactly this
+    # call. Reusing it removes pure sampling noise from the paired comparison and saves the call.
+    reuse = state.get("reuse") or {}
+    reused = bool(evidence and not notes and reuse.get("answer")
+                  and [x["chunk_id"] for x in evidence] == list(reuse.get("evidence_ids") or []))
+    if reused:
+        answer = reuse["answer"]
+    else:
+        answer = await llm.complete(P.GENERATE.format(insufficient=notes, matter=state["matter"],
+                                                      question=state["question"], evidence=ev_txt),
+                                    system=P.GENERATE_SYSTEM, model=CFG.strong_llm, purpose="generate", thinking=False)
     cited = sorted({int(n) for n in re.findall(r"\[(\d+)\]", answer or "") if 1 <= int(n) <= len(evidence)})
-    return {"answer": answer, "evidence": evidence,
-            "citations": [dict(n=n, chunk_id=evidence[n - 1]["chunk_id"], doc=evidence[n - 1]["doc"]) for n in cited]}
+    out = {"answer": answer, "evidence": evidence, "reused": reused,
+           "citations": [dict(n=n, chunk_id=evidence[n - 1]["chunk_id"], doc=evidence[n - 1]["doc"]) for n in cited]}
+    if reused:
+        out["log"] = _log(state, "generate: same evidence and prompt as single-shot -> its answer reused (eval)")
+    return out
 
 
 async def direct_answer(state: State) -> dict:
@@ -325,18 +383,20 @@ def build_graph():
 
 
 # --------------------------------------------------------------------------------------------- public API
-async def answer(question: str, task_id: str | None = None, policy: str = "adaptive", variant: str = "ctx") -> dict[str, Any]:
+async def answer(question: str, task_id: str | None = None, policy: str = "adaptive", variant: str = "ctx",
+                 reuse: dict | None = None) -> dict[str, Any]:
+    """reuse (eval only): single-shot's {"evidence_ids", "answer"} for this question, see generate()."""
     t0 = time.perf_counter()
     ctr = llm.start_counter()
     load_calibration()
     state = State(question=question, task_id=task_id, matter=_matters().get(task_id, "whole corpus"),
-                  policy=policy, variant=variant, log=[], subqs=[], iteration=0)
+                  policy=policy, variant=variant, reuse=reuse, log=[], subqs=[], iteration=0)
     with tracing.span("agent.answer", kind="AGENT", **{"input.value": question, "task_id": task_id or "corpus",
                                                        "policy": policy, "variant": variant}) as sp:
         out = await build_graph().ainvoke(state, {"recursion_limit": 60})
         res = dict(question=question, task_id=task_id, policy=policy, route=out.get("route"),
                    route_reason=out.get("route_reason"), answer=out.get("answer", ""), citations=out.get("citations", []),
-                   evidence=out.get("evidence", []), log=out.get("log", []),
+                   evidence=out.get("evidence", []), reused=bool(out.get("reused")), log=out.get("log", []),
                    subqs=[dict(q=s["q"], status=s["status"], rounds=s["rounds"], best=round(s["best"], 3),
                                n_chunks=len(s["chunks"])) for s in out.get("subqs", [])],
                    llm_calls=ctr["calls"], seconds=round(time.perf_counter() - t0, 1))

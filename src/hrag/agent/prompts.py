@@ -10,7 +10,9 @@ ROUTER = """Classify how much retrieval this question needs (Adaptive-RAG routin
 - simple: about ONE topic that one search can cover: a figure, date, party, clause, policy or position, including
   2-3 closely related facts and a short recommendation based on them.
 - complex: needs facts on SEVERAL distinct topics or documents that one search cannot cover, or a broad
-  synthesis (comparing markets/parties/positions, a full issues analysis or strategy across topics).
+  synthesis (comparing markets/parties/positions, a full issues analysis or strategy across topics); also when it
+  asks how two parties, entities or facts relate, or needs a fact about something that must first be identified
+  from the documents (e.g. "X's former employer", "the fund's largest investor", "the counterparty to that contract").
 When in doubt, choose simple.
 
 Matter: {matter}
@@ -19,15 +21,21 @@ ROUTER_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["
                  "properties": {"route": {"type": "string", "enum": ["direct", "simple", "complex"]},
                                 "reason": {"type": "string"}}}
 
-PLAN = """Decompose the question into 2-5 self-contained sub-questions for document search. Each sub-question must be
-answerable from a single passage, name the specific entities, markets, documents or terms involved, and together they
-must cover everything the question asks.{gaps}
+PLAN = """The question has already been searched once in the matter's documents; the passages found are listed under
+"First search". Write 1-4 more self-contained sub-questions for document search, covering the parts of the question
+those passages do not answer, so that together with the first search they cover everything the question asks. Each
+sub-question must be answerable from a single passage and name the specific entities, markets, documents, clauses or
+terms involved, using the names, defined terms and document titles that appear in the passages where they fit. Do not
+ask about legal tests, standards or factors that the question itself does not ask about.
 
 Matter: {matter}
-Question: {question}"""
+Question: {question}
+
+First search:
+{found}"""
 PLAN_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["subquestions"],
                "properties": {"subquestions": {"type": "array", "items": {"type": "string"}, "minItems": 1,
-                                               "maxItems": 5}}}
+                                               "maxItems": 4}}}
 
 GRADE = """Retrieval evaluator (CRAG). For each numbered passage, decide whether it contains information that helps
 answer the question (directly, or as a necessary part of the answer, e.g. the clause, figure, party position or
@@ -58,9 +66,14 @@ REWRITE_SCHEMA = {"type": "object", "additionalProperties": False, "required": [
                   "properties": {"keywords": {"type": "string"}, "hyde": {"type": "string"}}}
 
 SUFFICIENCY = """Given the question and the evidence gathered so far (grouped by sub-question), decide whether the
-evidence is sufficient. It is sufficient unless some PART of the question is not addressed by any evidence at all
-(more detail on a part that is already covered does not count). If not, list up to 2 NEW sub-questions for the
-unaddressed parts only.
+evidence is sufficient. It is NOT sufficient when:
+1. some PART of the question is not addressed by any evidence at all (more detail on a part that is already covered
+   does not count); or
+2. the answer depends on a LINK that no passage states: an entity named in one passage (e.g. a former employer, a
+   parent or subsidiary, an investor, a signatory, a counterparty) whose relation to an entity in the question or in
+   another passage must be known to answer.
+If not sufficient, list up to 2 NEW sub-questions for the unaddressed parts or the missing links only. A sub-question
+for a link names both entities exactly as the passages write them.
 Only ask for information that THIS MATTER'S OWN DOCUMENTS could contain (deal facts, figures, parties' statements,
 internal analyses). Never ask for current law, updated thresholds, market news or anything outside the data room;
 the answer will flag those as needing outside verification. Do not repeat earlier sub-questions. Leave the list
