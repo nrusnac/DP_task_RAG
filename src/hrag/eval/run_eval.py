@@ -1,14 +1,14 @@
 """C3-C5: retrieval ablations, CRAG threshold calibration, and generation eval (agent vs. baselines).
 
-qa.jsonl has two splits (docs/05-evaluation.md): `dev` (the 110 questions that shaped the design) and `test` (matters
-never used while building it). Calibration uses dev only; the generation eval defaults to test. qa_hard.jsonl holds
-the hard sets (build_hard.py): two-step links, multi-document questions and unanswerable questions inside a matter.
+qa.jsonl has two splits (docs/05-evaluation.md): `dev` (the 110 questions that shaped the original design) and `test`
+(now a regression set after its failures motivated fixes). Calibration uses dev; generation defaults to test.
+qa_hard.jsonl holds the post-freeze two-step-link and multi-document hard sets (build_hard.py).
 
     python -m hrag.eval.run_eval retrieval                       # no LLM calls: every retrieval configuration, per split
     python -m hrag.eval.run_eval calibrate                       # CRAG thresholds from dev rerank-score distributions
     python -m hrag.eval.run_eval generation --tag test_v3 --resume          # whole test split: single_shot vs. agent
-    python -m hrag.eval.run_eval hard --tag hard_v1 --resume                # the hard sets
-    python -m hrag.eval.run_eval report --tags test_v3 hard_v1              # comparison tables, no LLM calls
+    python -m hrag.eval.run_eval hard --tag hard_v2 --resume                # strict hard sets
+    python -m hrag.eval.run_eval report --tags test_v3 hard_v2              # comparison tables, no LLM calls
     python -m hrag.eval.run_eval generation --n 20 --systems agent:simple agent:complex agent   # Adaptive-RAG ablation
     python -m hrag.eval.run_eval negatives --n 40 --systems single_shot agent                   # cross-matter negatives
 
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import random
 import re
@@ -34,6 +35,8 @@ from .metrics import summarize
 
 EVAL_DIR = CFG.artifacts_dir / "eval"
 SPLITS = ("dev", "test")
+HARD_KINDS = ("bridge", "aspect")
+HARD_TARGET_PER_KIND = 25
 
 
 def load_qa(path: Path | None = None, split: str | None = None) -> list[dict]:
@@ -43,6 +46,14 @@ def load_qa(path: Path | None = None, split: str | None = None) -> list[dict]:
 
 def available_variants() -> list[str]:
     return [v for v in ("raw", "header", "ctx") if (CFG.index_dir / f"dense_{v}.npy").exists()]
+
+
+def default_variant() -> str:
+    """The branch is evaluated on header (decision #44). Fall back only when that index was not built."""
+    variants = available_variants()
+    if not variants:
+        raise FileNotFoundError(f"no indexes found in {CFG.index_dir}; run hrag.index.build first")
+    return CFG.default_variant if CFG.default_variant in variants else variants[-1]
 
 
 @lru_cache(maxsize=1)
@@ -126,7 +137,7 @@ def calibrate(variant: str | None = None, seed: int = 11, split: str = "dev") ->
     (same practice area when possible), where the answer cannot exist. Thresholds: see `thresholds`.
     """
     from ..agent.graph import retriever
-    v = variant or available_variants()[-1]
+    v = variant or default_variant()
     R = retriever(v)
     rng = random.Random(seed)
     tasks = sorted(set(R.task_ids))
@@ -158,9 +169,10 @@ def calibrate(variant: str | None = None, seed: int = 11, split: str = "dev") ->
                              ambiguous_share=round(float(np.mean(np.r_[(ps >= tau_low) & (ps < tau_high),
                                                                        (ns >= tau_low) & (ns < tau_high)])), 3)),
                previous=dict(crag_high=CFG.crag_high, crag_low=CFG.crag_low))
-    CFG.crag_high, CFG.crag_low = tau_high, tau_low  # apply immediately for the rest of this session
     EVAL_DIR.mkdir(parents=True, exist_ok=True)
     (EVAL_DIR / "crag_calibration.json").write_text(json.dumps(out, indent=1))
+    from ..agent.graph import load_calibration
+    load_calibration.cache_clear()
     print(json.dumps({k: v for k, v in out.items() if k != "raw"}, indent=1))
     return out
 
@@ -168,8 +180,7 @@ def calibrate(variant: str | None = None, seed: int = 11, split: str = "dev") ->
 # ------------------------------------------------------------------------------------------- C4-C5 generation
 ABSTAIN_MARKERS = ("do not establish", "does not establish", "not found in", "no evidence", "do not contain",
                    "does not contain", "not addressed in")
-_CITATION = re.compile(r"\[\d+\]")
-HARD_KINDS = ("bridge", "aspect", "absent")
+_CITATION = re.compile(r"\[(\d+)\]")
 
 
 def abstained(answer: str | None) -> bool:
@@ -220,6 +231,109 @@ async def _run_system(system: str, it: dict, variant: str, reuse: dict | None = 
         return await baseline.single_shot(it["question"], it["task_id"], variant=variant)
     policy = system.split(":", 1)[1] if ":" in system else "adaptive"
     return await answer(it["question"], task_id=it["task_id"], policy=policy, variant=variant, reuse=reuse)
+
+
+def _sha(value) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
+
+
+@lru_cache(maxsize=1)
+def _source_sha() -> str:
+    """Fingerprint the implementation that produces and judges answers, including uncommitted edits."""
+    root = Path(__file__).resolve().parents[2]
+    h = hashlib.sha256()
+    for path in sorted(root.rglob("*.py")):
+        h.update(str(path.relative_to(root)).encode())
+        h.update(path.read_bytes())
+    return h.hexdigest()
+
+
+def _file_set_sha(paths: list[Path]) -> str:
+    """Hash named files/directories with portable relative names, so moved runs can still be resumed safely."""
+    h = hashlib.sha256()
+    for root in paths:
+        h.update(root.name.encode())
+        files = sorted(p for p in root.rglob("*") if p.is_file()) if root.is_dir() else [root]
+        for path in files:
+            name = str(path.relative_to(root)) if root.is_dir() else path.name
+            h.update(name.encode())
+            if not path.exists():
+                h.update(b"<missing>")
+                continue
+            with open(path, "rb") as f:
+                for block in iter(lambda: f.read(1024 * 1024), b""):
+                    h.update(block)
+        if not root.exists():
+            h.update(b"<missing>")
+    return h.hexdigest()
+
+
+def _retriever_sha(variant: str) -> str:
+    """Fingerprint the corpus and exact dense/sparse indexes consumed by HybridRetriever."""
+    inputs = [CFG.artifacts_dir / "chunks.parquet", CFG.index_dir / f"dense_{variant}.npy",
+              CFG.index_dir / f"bm25_{variant}"]
+    if variant == "ctx":
+        inputs.append(CFG.artifacts_dir / "contexts.jsonl")
+    return _file_set_sha(inputs)
+
+
+def _manifest_path(tag: str) -> Path:
+    return EVAL_DIR / f"manifest_{tag}.json"
+
+
+def _prepare_run(tag: str, kind: str, variant: str, systems: list[str], items: list[dict], resume: bool,
+                 post: bool = True) -> None:
+    """Bind resumable outputs to their inputs and implementation. A fresh run clears every derived sidecar; a resume
+    refuses to combine answers or judgments produced under another configuration."""
+    EVAL_DIR.mkdir(parents=True, exist_ok=True)
+    manifest_path = _manifest_path(tag)
+    gen_path = EVAL_DIR / f"gen_{tag}.jsonl"
+    from ..agent.graph import load_calibration
+    calibration = load_calibration(variant)
+    comparison_required = {"agent", "single_shot"} <= set(systems)
+    spec = dict(version=2, tag=tag, kind=kind, variant=variant, systems=systems,
+                items_sha256=_sha(items), n_items=len(items), source_sha256=_source_sha(),
+                retriever_sha256=_retriever_sha(variant), embed_model=CFG.embed_model,
+                rerank_model=CFG.rerank_model, fast_llm=CFG.fast_llm, strong_llm=CFG.strong_llm,
+                crag_high=calibration["crag_high"], crag_low=calibration["crag_low"],
+                dense_k=CFG.dense_k, bm25_k=CFG.bm25_k, rrf_k=CFG.rrf_k,
+                rerank_candidates=CFG.rerank_candidates, rerank_top=CFG.rerank_top,
+                rerank_fusion=CFG.rerank_fusion, post_required=comparison_required)
+    derived = [gen_path, EVAL_DIR / f"rejudge_{tag}.jsonl", EVAL_DIR / f"pairwise_{tag}.jsonl",
+               EVAL_DIR / f"summary_gen_{tag}.json", EVAL_DIR / f"compare_{tag}.json"]
+    if not resume:
+        for path in derived + [manifest_path]:
+            path.unlink(missing_ok=True)
+    elif any(path.exists() for path in derived) and not manifest_path.exists():
+        legacy = [path.name for path in derived if path.exists()]
+        raise RuntimeError(f"cannot safely resume {tag}: {legacy} have no run manifest; use a new tag")
+    if manifest_path.exists():
+        old = json.loads(manifest_path.read_text())
+        mismatch = {k: (old.get(k), v) for k, v in spec.items() if old.get(k) != v}
+        if mismatch:
+            raise RuntimeError(f"cannot resume {tag}: run configuration changed: {mismatch}; use a new tag")
+        old["post_requested"] = bool(old.get("post_requested") or post)
+        manifest_path.write_text(json.dumps(old, indent=1))
+    else:
+        manifest_path.write_text(json.dumps(spec | {"post_requested": post, "post_complete": False,
+                                                      "complete": False, "stage": "answers"}, indent=1))
+
+
+def _update_manifest(tag: str, **state) -> None:
+    path = _manifest_path(tag)
+    manifest = json.loads(path.read_text())
+    manifest.update(state)
+    path.write_text(json.dumps(manifest, indent=1))
+
+
+def _completion_state(left: int, post: bool, systems: list[str], rejudge_left: int | None,
+                      pairwise_left: int | None) -> tuple[bool, bool, str]:
+    """Return (run complete, post complete, stage); comparisons always require both post-passes."""
+    comparison_required = {"agent", "single_shot"} <= set(systems)
+    post_complete = comparison_required and post and not rejudge_left and not pairwise_left
+    complete = not left and (not comparison_required or post_complete)
+    stage = "complete" if complete else "post_skipped" if not left and comparison_required and not post else "incomplete"
+    return complete, post_complete, stage
 
 
 def _load_done(out_path: Path, resume: bool) -> dict[tuple[str, str], dict]:
@@ -334,7 +448,9 @@ def _reuse(prev: dict) -> dict | None:
 def _record(it: dict, system: str, res: dict) -> dict:
     ev_ids = [e["chunk_id"] for e in res["evidence"]]
     gold = set(it.get("gold") or [])
-    cited = {c["chunk_id"] for c in res.get("citations", [])} or set(ev_ids)
+    cited = {c["chunk_id"] for c in res.get("citations", [])}
+    cited |= {ev_ids[int(n) - 1] for n in _CITATION.findall(res.get("answer") or "")
+              if 1 <= int(n) <= len(ev_ids)}
     return dict(qid=it["qid"], task_id=it["task_id"], system=system, kind=it["kind"], route=res.get("route"),
                 abstained=abstained(res["answer"]), hedged=hedged(res["answer"]),
                 key_fact_recall=key_fact_recall(res["answer"], it.get("key_facts")),
@@ -367,14 +483,14 @@ async def generation(n: int | None = None, systems=("single_shot", "agent"), see
     every pair is done, discordant rubric verdicts are re-judged (majority of 3) and answers that differ get a
     pairwise judgment; the comparison with confidence intervals is written to compare_<tag>.json."""
     from .judge import judge_correctness
-    variant = variant or available_variants()[-1]
+    variant = variant or default_variant()
     items = load_qa(split=split)
     random.Random(seed).shuffle(items)
     items = [i for i in items if i["qid"] in set(qids)] if qids else items[:n] if n else items
     systems = _ordered(systems)
     tag = tag or "_".join(s.replace(":", "-") for s in systems)
     out_path = EVAL_DIR / f"gen_{tag}.jsonl"
-    EVAL_DIR.mkdir(parents=True, exist_ok=True)
+    _prepare_run(tag, "generation", variant, systems, items, resume, post)
     done = _load_done(out_path, resume)
 
     async def work(it, system, prev):
@@ -393,13 +509,24 @@ async def generation(n: int | None = None, systems=("single_shot", "agent"), see
     todo = sum((it["qid"], s) not in done for it in items for s in systems)
     print(f"{len(items)} questions x {len(systems)} systems: {len(done)} done earlier, {todo} to run", flush=True)
     left = await _run_items(items, systems, work, out_path, done, concurrency)
+    rejudge_left = pairwise_left = None
     if left:
         print(f"INCOMPLETE: {left} pairs still missing -- rerun with resume=True", flush=True)
     elif post and {"agent", "single_shot"} <= set(systems):
         by_qid = {it["qid"]: it for it in items}
-        await rejudge(tag, by_qid, "verdict", lambda it, r: judge_correctness(it, r["answer"]), "pass")
-        await pairwise(tag, by_qid, lambda it: "Reference answer (written from the matter's grading rubric; it may be "
-                                               f"imperfect): {it['expected_answer']}\n")
+        rejudge_left = await rejudge(tag, by_qid, "verdict",
+                                    lambda it, r: judge_correctness(it, r["answer"]), "pass")
+        if not rejudge_left:
+            pairwise_left = await pairwise(
+                tag, by_qid, lambda it: "Reference answer (written from the matter's grading rubric; it may be "
+                                        f"imperfect): {it['expected_answer']}\n")
+    complete, post_complete, stage = _completion_state(left, post, systems, rejudge_left, pairwise_left)
+    _update_manifest(tag, complete=complete, stage=stage, post_complete=post_complete,
+                     answer_pairs_left=left, rejudge_answers_left=rejudge_left,
+                     pairwise_questions_left=pairwise_left)
+    if not complete and not left:
+        print("INCOMPLETE: acceptance comparison requires post-pass judgments; rerun with post=True, resume=True",
+              flush=True)
     return _finish(tag, items, systems)
 
 
@@ -408,19 +535,53 @@ def load_hard(path: Path | None = None) -> list[dict]:
     return [json.loads(l) for l in open(path)] if path.exists() else []
 
 
+def validate_hard_set(items: list[dict], kinds=HARD_KINDS, target: int = HARD_TARGET_PER_KIND) -> None:
+    """Refuse a headline hard-set run until every selected kind is complete and passed the current verifier."""
+    current = [i for i in items if i.get("kind") in kinds and i.get("verification_version") == 2]
+    counts = {kind: sum(i.get("kind") == kind for i in current) for kind in kinds}
+    unverified = [i.get("qid") for i in items if i.get("kind") in kinds and i.get("verification_version") != 2]
+    missing = {kind: target - counts[kind] for kind in kinds if counts[kind] < target}
+    qids, questions = [i.get("qid") for i in current], [i.get("question") for i in current]
+    malformed = []
+    per_matter = {}
+    for i in current:
+        key = (i.get("kind"), i.get("task_id"))
+        per_matter[key] = per_matter.get(key, 0) + 1
+        n = 2 if i.get("kind") == "bridge" else 3
+        verify = i.get("verify") or {}
+        if (len(i.get("gold") or []) != n or len(verify.get("alone") or []) != n
+                or len(verify.get("without_each") or []) != n or any(verify.get("alone") or [])
+                or any(verify.get("without_each") or []) or not verify.get("together_ok")
+                or not verify.get("link_hidden") or verify.get("gives_away")
+                or not i.get("facts")
+                or len(verify.get("facts_supported") or []) != len(i.get("facts") or [])
+                or not all(verify.get("facts_supported") or [])):
+            malformed.append(i.get("qid"))
+    duplicates = len(qids) != len(set(qids)) or len(questions) != len(set(questions))
+    over_cap = [f"{kind}/{task}" for (kind, task), count in per_matter.items() if count > 2]
+    if missing or malformed or duplicates or over_cap:
+        raise RuntimeError("hard set is not ready: "
+                           f"validated counts={counts}, missing={missing}, malformed={malformed}, "
+                           f"duplicates={duplicates}, over_cap={over_cap}, unverified_ignored={len(unverified)}; "
+                           "run `python -m hrag.eval.build_hard --kinds bridge aspect --n 25`")
+
+
 async def hard(kinds=HARD_KINDS, systems=("single_shot", "agent"), n: int | None = None, variant: str | None = None,
-               concurrency: int = 3, tag: str = "hard_v1", resume: bool = True, post: bool = True) -> dict:
-    """The hard sets (build_hard.py, docs/05 "Hard sets"): two-step links (bridge), questions needing one fact from each
-    of three documents (aspect), and questions the matter's documents cannot answer (absent). Gold passages and
-    expected answers are known by construction, so answerable items are judged against them (judge_reference) and
-    retrieval completeness is exact (all gold chunks in the evidence)."""
+               concurrency: int = 3, tag: str = "hard_v2", resume: bool = True, post: bool = True,
+               require_complete: bool = True) -> dict:
+    """Strict hard sets (build_hard.py, docs/05): two-step links (bridge) and questions needing one necessary fact from
+    each of three documents (aspect). Answers are judged against the selected source passages and expected answer;
+    `all_gold_in_evidence` means all selected source chunks were retrieved, not that equivalent evidence cannot exist."""
     from .judge import judge_reference
-    variant = variant or available_variants()[-1]
-    items = [i for i in load_hard() if i["kind"] in kinds]
+    variant = variant or default_variant()
+    all_items = load_hard()
+    if require_complete:
+        validate_hard_set(all_items, kinds)
+    items = [i for i in all_items if i["kind"] in kinds and i.get("verification_version") == 2]
     items = items[:n] if n else items
     systems = _ordered(systems)
     out_path = EVAL_DIR / f"gen_{tag}.jsonl"
-    EVAL_DIR.mkdir(parents=True, exist_ok=True)
+    _prepare_run(tag, "hard", variant, systems, items, resume, post)
     done = _load_done(out_path, resume)
 
     async def work(it, system, prev):
@@ -438,13 +599,22 @@ async def hard(kinds=HARD_KINDS, systems=("single_shot", "agent"), n: int | None
     todo = sum((it["qid"], s) not in done for it in items for s in systems)
     print(f"{len(items)} hard questions x {len(systems)} systems: {len(done)} done earlier, {todo} to run", flush=True)
     left = await _run_items(items, systems, work, out_path, done, concurrency)
+    rejudge_left = pairwise_left = None
     if left:
         print(f"INCOMPLETE: {left} pairs still missing -- rerun with resume=True", flush=True)
     elif post and {"agent", "single_shot"} <= set(systems):
         by_qid = {it["qid"]: it for it in items if it["kind"] != "absent"}
-        await rejudge(tag, by_qid, "reference_verdict",
-                      lambda it, r: judge_reference(it, r["answer"], passages(it["gold"])), "correct")
-        await pairwise(tag, by_qid, lambda it: f"Reference answer: {it['expected_answer']}\n")
+        rejudge_left = await rejudge(tag, by_qid, "reference_verdict",
+                                    lambda it, r: judge_reference(it, r["answer"], passages(it["gold"])), "correct")
+        if not rejudge_left:
+            pairwise_left = await pairwise(tag, by_qid, lambda it: f"Reference answer: {it['expected_answer']}\n")
+    complete, post_complete, stage = _completion_state(left, post, systems, rejudge_left, pairwise_left)
+    _update_manifest(tag, complete=complete, stage=stage, post_complete=post_complete,
+                     answer_pairs_left=left, rejudge_answers_left=rejudge_left,
+                     pairwise_questions_left=pairwise_left)
+    if not complete and not left:
+        print("INCOMPLETE: acceptance comparison requires post-pass judgments; rerun with post=True, resume=True",
+              flush=True)
     return _finish(tag, items, systems)
 
 
@@ -494,8 +664,9 @@ async def pairwise(tag: str, items: dict[str, dict], reference, a: str = "agent"
         first, second = (d[a], d[b]) if agent_first else (d[b], d[a])
 
         async def job(q=q, first=first, second=second, agent_first=agent_first):
-            ev = passages(first.get("evidence_ids", []) + second.get("evidence_ids", []))
-            j = await judge_pairwise(items[q]["question"], reference(items[q]), first["answer"], second["answer"], ev)
+            first_ev, second_ev = passages(first.get("evidence_ids", [])), passages(second.get("evidence_ids", []))
+            j = await judge_pairwise(items[q]["question"], reference(items[q]), first["answer"], second["answer"],
+                                     first_ev, second_ev)
             winner = {"1": first["system"], "2": second["system"]}.get(j["winner"], "tie")
             return dict(qid=q, task_id=items[q]["task_id"], winner=winner, agent_first=agent_first,
                         reasoning=j["reasoning"])
@@ -525,6 +696,11 @@ def compare_tag(tag: str, a: str = "agent", b: str = "single_shot") -> dict:
     """Paired comparison of a run (stats.compare) on all questions, where the agent took its own path, per question
     kind and per audit stratum of the rubric; written to compare_<tag>.json."""
     from . import stats
+    manifest = _manifest_path(tag)
+    if not manifest.exists():
+        raise RuntimeError(f"run {tag} has no manifest and cannot be verified; rerun it with the current evaluator")
+    if not json.loads(manifest.read_text()).get("complete"):
+        raise RuntimeError(f"run {tag} is incomplete; resume it before comparing")
     records, prefs = load_records(tag)
     audit = {i["qid"]: i.get("audit") for i in load_qa() + load_hard()}
     subsets = {"all": lambda ra, rb: True, "agent took its own path": lambda ra, rb: not ra.get("reused")}
@@ -547,8 +723,11 @@ def _finish(tag: str, items: list[dict], systems: list[str]) -> dict:
     summary = summarize_generation(records)
     (EVAL_DIR / f"summary_gen_{tag}.json").write_text(json.dumps(summary, indent=1))
     print(json.dumps(summary, indent=1))
-    if {"agent", "single_shot"} <= set(systems):
+    manifest = json.loads(_manifest_path(tag).read_text()) if _manifest_path(tag).exists() else {}
+    if {"agent", "single_shot"} <= set(systems) and manifest.get("complete"):
         print(stats.format_table(compare_tag(tag)))
+    elif {"agent", "single_shot"} <= set(systems):
+        print(f"PARTIAL RUN: {tag} is not complete; no acceptance comparison is reported", flush=True)
     return summary
 
 
@@ -556,6 +735,11 @@ def report(tags: list[str]) -> None:
     """Print the comparison tables of finished runs (recomputed from the files: no LLM calls)."""
     from . import stats
     for tag in tags:
+        manifest = _manifest_path(tag)
+        if not manifest.exists():
+            raise RuntimeError(f"run {tag} has no manifest and cannot be verified; rerun it with the current evaluator")
+        if not json.loads(manifest.read_text()).get("complete"):
+            raise RuntimeError(f"run {tag} is incomplete; resume it before reporting")
         print(f"\n######## {tag}")
         print(stats.format_table(compare_tag(tag)))
 
@@ -577,9 +761,9 @@ async def negatives(n: int = 40, systems=("single_shot", "agent"), seed: int = 2
                     resume: bool = False) -> dict:
     """Unanswerable questions: each QA question is asked against ANOTHER matter's data room (same practice area when
     possible). A correct system declines; an incorrect one answers from look-alike evidence (a hallucination with
-    citations). The hard set's `absent` kind is the harder version: unanswerable inside the matter itself."""
+    citations). The experimental inside-matter `absent` builder is not part of the headline hard run."""
     from ..agent.graph import _matters
-    variant = variant or available_variants()[-1]
+    variant = variant or default_variant()
     rng = random.Random(seed)
     items = [i for i in load_qa(split=split) if i["gold"]]
     rng.shuffle(items)
@@ -681,9 +865,9 @@ if __name__ == "__main__":
         asyncio.run(negatives(a.n or 40, a.systems, variant=a.variant, split=a.split or "test", tag=a.tag,
                               resume=a.resume))
     elif a.what == "hard":
-        asyncio.run(hard(systems=a.systems, n=a.n, variant=a.variant, tag=a.tag or "hard_v1", resume=a.resume))
+        asyncio.run(hard(systems=a.systems, n=a.n, variant=a.variant, tag=a.tag or "hard_v2", resume=a.resume))
     elif a.what == "report":
-        report(a.tags or ["test_v3", "hard_v1"])
+        report(a.tags or ["test_v3", "hard_v2"])
     else:
         asyncio.run(generation(a.n, a.systems, variant=a.variant, split=a.split or "test", tag=a.tag,
                                resume=a.resume))

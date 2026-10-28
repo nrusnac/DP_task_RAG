@@ -7,14 +7,13 @@ top 8 held a gold chunk for 93% of labelled test questions), so they can't show 
   bridge  two passages in different documents share an entity; the question needs a fact from each and does not
           name the entity, so the second passage can only be found after reading the first (a two-step link)
   aspect  three related passages from three documents; the question needs one fact from each
-  absent  a specific question such a data room could plausibly answer, that no passage of this matter answers
+  absent  experimental only: a question not answered by a deep lexical sample (not proof of corpus-wide absence)
 
-A writer call proposes each item; a separate verifier call checks it (bridge/aspect: no single passage answers the
-question and all of them together do; absent: no keyword-retrieved passage answers it, even partly). Matters: every
-matter outside the dev split, at most 2 items per matter and kind. Items are appended to qa_hard.jsonl as they are
-accepted, so a run stopped by a session limit continues where it stopped.
+A writer call proposes each item; a separate verifier checks every fact, every passage alone, and every
+leave-one-passage-out subset. Matters: every matter outside the dev split, at most 2 items per matter and kind. Items
+are appended to qa_hard.jsonl as they are accepted, so a run stopped by a session limit continues where it stopped.
 
-    python -m hrag.eval.build_hard --kinds bridge aspect absent --n 25
+    python -m hrag.eval.build_hard --kinds bridge aspect --n 25
 """
 from __future__ import annotations
 
@@ -33,6 +32,7 @@ from ..config import CFG
 from .build_qa import QA_PATH, _load_inputs, lexical_top
 
 HARD_PATH = CFG.artifacts_dir / "eval" / "qa_hard.jsonl"
+VERIFICATION_VERSION = 2
 PER_MATTER = 2       # accepted items per matter and kind
 WAVE = 6             # candidates written + verified concurrently
 # the link behind test question C-022 motivated the agent's link-finding step: no hard item may reuse it
@@ -91,16 +91,32 @@ VERIFY_MULTI = """Check an evaluation question that should need ALL of the passa
 
 Question: {question}
 Expected answer: {expected_answer}
+Required facts proposed by the writer:
+{facts}
+
+Hidden-link requirement: {link_rule}
 
 {passages}
 
 1. For each passage ALONE (in order): can the question be fully answered from that passage alone?
-2. With ALL passages together: is the expected answer correct and fully supported?
-3. Does the question itself contain or give away the expected answer?"""
+2. For each passage (in order), remove it and read ALL the others: can the question still be fully answered? A true
+   multi-passage item must be incomplete every time one passage is removed.
+3. For each required fact (in order), is it stated by the passages, and do the facts collectively require a distinct
+   contribution from every passage?
+4. With ALL passages together: is the expected answer correct and fully supported?
+5. Is the hidden-link requirement satisfied? If there is no hidden-link requirement, set this true.
+6. Does the question itself contain or give away the expected answer?
+
+Be conservative. If your explanation says one passage is redundant or another passage alone suffices, the matching
+boolean must reflect that; do not accept the item."""
 VERIFY_MULTI_SCHEMA = {"type": "object", "additionalProperties": False,
-                       "required": ["alone", "together_ok", "gives_away", "note"],
+                       "required": ["alone", "without_each", "facts_supported", "together_ok", "link_hidden",
+                                    "gives_away", "note"],
                        "properties": {"alone": {"type": "array", "items": {"type": "boolean"}},
+                                      "without_each": {"type": "array", "items": {"type": "boolean"}},
+                                      "facts_supported": {"type": "array", "items": {"type": "boolean"}},
                                       "together_ok": {"type": "boolean"}, "gives_away": {"type": "boolean"},
+                                      "link_hidden": {"type": "boolean"},
                                       "note": {"type": "string"}}}
 
 ABSENT_WRITE = """You are writing evaluation questions for a legal document-search system. Below are the document
@@ -212,29 +228,39 @@ async def _bridge(cand: dict) -> dict | None:
                                                text_a=a.text[:3000], doc_b=f"{b.doc_id} § {b.section or b.kind}",
                                                text_b=b.text[:3000]),
                            model=CFG.strong_llm, schema=WRITE_SCHEMA, purpose="hard_write")
-    if w.get("skip") or cand["entity"].lower() in w["question"].lower():
+    if (w.get("skip") or len(w.get("facts") or []) < 2 or len(w.get("key_facts") or []) < 2
+            or cand["entity"].lower() in w["question"].lower()):
         return None
-    return await _verify_multi(w, [a, b], ["A", "B"], dict(entity=cand["entity"]))
+    return await _verify_multi(w, [a, b], ["A", "B"], dict(entity=cand["entity"]), cand["entity"])
 
 
 async def _aspect(cand: dict) -> dict | None:
     rows = cand["chunks"]
     w = await llm.complete(ASPECT_WRITE.format(passages=_passage_block(rows, ["1", "2", "3"])),
                            model=CFG.strong_llm, schema=WRITE_SCHEMA, purpose="hard_write")
-    if w.get("skip"):
+    if w.get("skip") or len(w.get("facts") or []) != 3 or len(w.get("key_facts") or []) < 3:
         return None
     return await _verify_multi(w, rows, ["1", "2", "3"], {})
 
 
-async def _verify_multi(w: dict, rows, labels, extra: dict) -> dict | None:
+async def _verify_multi(w: dict, rows, labels, extra: dict, hidden_link: str | None = None) -> dict | None:
+    link_rule = (f'The question must not name, alias, expand, abbreviate or otherwise identify "{hidden_link}"; '
+                 "the reader should discover that entity only from the first passage."
+                 if hidden_link else "None; set link_hidden to true.")
     v = await llm.complete(VERIFY_MULTI.format(question=w["question"], expected_answer=w["expected_answer"],
+                                               facts="\n".join(f"{i}. {x}" for i, x in enumerate(w["facts"], 1)),
+                                               link_rule=link_rule,
                                                passages=_passage_block(rows, labels)),
                            model=CFG.strong_llm, schema=VERIFY_MULTI_SCHEMA, purpose="hard_verify")
-    ok = len(v["alone"]) == len(rows) and not any(v["alone"]) and v["together_ok"] and not v["gives_away"]
+    ok = (len(v["alone"]) == len(rows) and not any(v["alone"])
+          and len(v["without_each"]) == len(rows) and not any(v["without_each"])
+          and len(v["facts_supported"]) == len(w["facts"]) and all(v["facts_supported"])
+          and v["together_ok"] and v["link_hidden"] and not v["gives_away"])
     if not ok:
         return None
     return dict(question=w["question"], expected_answer=w["expected_answer"], facts=w["facts"],
-                key_facts=w["key_facts"], gold=[r.chunk_id for r in rows], verify=v, **extra)
+                key_facts=w["key_facts"], gold=[r.chunk_id for r in rows], verify=v,
+                verification_version=VERIFICATION_VERSION, **extra)
 
 
 async def _absent_questions(tc: pd.DataFrame, title: str, rng: random.Random, k: int = 3) -> list[dict]:
@@ -256,7 +282,8 @@ async def _absent(cand: dict, tc: pd.DataFrame) -> dict | None:
     if v["answered"] != "no":
         return None
     return dict(question=q, expected_answer="The documents provided do not establish this.", facts=[], key_facts=[],
-                gold=[], verify=dict(v, n_passages_checked=len(rows), terms=terms))
+                gold=[], verify=dict(v, n_passages_checked=len(rows), terms=terms),
+                verification_version=VERIFICATION_VERSION)
 
 
 # ------------------------------------------------------------------------------------------- build
@@ -278,8 +305,9 @@ async def build(kind: str, n: int = 25, seed: int = 13, show: int = 0) -> list[d
     titles = {t["task_id"]: t["title"] or t["task_id"] for t in tasks}
     dev = {json.loads(l)["task_id"] for l in open(QA_PATH) if json.loads(l).get("split", "dev") == "dev"}
     have = load_hard()
+    verified = [i for i in have if i.get("verification_version") == VERIFICATION_VERSION]
     per_matter: dict[str, int] = {}
-    for i in have:
+    for i in verified:
         if i["kind"] == kind:
             per_matter[i["task_id"]] = per_matter.get(i["task_id"], 0) + 1
     used = {tuple(i["gold"]) for i in have} | {i["question"] for i in have}
@@ -291,6 +319,8 @@ async def build(kind: str, n: int = 25, seed: int = 13, show: int = 0) -> list[d
 
     async def candidates():
         for t in matters:
+            if per_matter.get(t, 0) >= PER_MATTER:
+                continue
             tc = chunks[chunks.task_id == t]
             mrng = random.Random(f"{seed}:{kind}:{t}")
             if kind == "bridge":
@@ -350,7 +380,7 @@ async def build(kind: str, n: int = 25, seed: int = 13, show: int = 0) -> list[d
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--kinds", nargs="+", default=["bridge", "aspect", "absent"])
+    ap.add_argument("--kinds", nargs="+", default=["bridge", "aspect"])
     ap.add_argument("--n", type=int, default=25, help="items per kind")
     ap.add_argument("--show", type=int, default=0, help="print this many accepted items per kind")
     a = ap.parse_args()

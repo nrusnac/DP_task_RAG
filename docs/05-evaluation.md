@@ -15,7 +15,7 @@ flowchart LR
 
 **Splits.** `qa.jsonl` has a `split` field:
 - **`dev`** (110 questions, 14 antitrust matters): every question used on `main`. They shaped the design: 30 tuned prompts and the refinement fix, 57 labelled ones set the CRAG thresholds and the retrieval choices.
-- **`test`** (126 questions, 16 matters): the 4 antitrust matters with no questions on `main` plus the 12 non-drafting deal-regulatory matters added to the corpus ([01](01-dataset.md)). Generated after the branch's code changes, and used by nothing that tunes the system. A **matter-level** held-out set: no test matter appears in dev. (One caveat: the demo cells use one test matter, `analyze-iss-antitrust-transaction-structure`, so its documents were seen during development, but none of its rubric criteria were.)
+- **`test`** (126 questions, 16 matters): the 4 antitrust matters with no questions on `main` plus the 12 non-drafting deal-regulatory matters added to the corpus ([01](01-dataset.md)). It began as a **matter-level** held-out set (no test matter appears in dev), but both runs were inspected and C-022/C-039 motivated later agent fixes. It is therefore a regression set now, not an untouched estimate. The post-freeze hard questions below are the clean comparison. (The demo also uses `analyze-iss-antitrust-transaction-structure`.)
 
 **C1 · QA generation** (`build_qa.py`): `build` sampled 14 non-drafting tasks × 8 criteria (dev); `extend` adds 8 criteria for every non-drafting matter without questions (test), keeping existing questions untouched. One Sonnet call per task rewrites each criterion as:
 - the *question a lawyer would ask the data room*, without revealing the answer
@@ -40,27 +40,30 @@ Drafting tasks are excluded, and `skip` criteria are dropped, because those crit
 
 **C4 · Generation** (`run_eval.py generation`, default: the whole test split): systems compared on the same questions:
 - `naive`: dense-only, raw-text index, top-8 chunks, one generation call
-- `single_shot`: hybrid + rerank on the contextual index, top-8 chunks, one call (advanced but fixed)
+- `single_shot`: hybrid + rerank on the `header` index, top-8 chunks, one call (advanced but fixed)
 - `agent`: the LangGraph Adaptive-RAG + CRAG module
 - `agent:simple` / `agent:complex`: forced routes, for the Adaptive-RAG ablation
 
-Metrics:
-- **Harvey-judge pass rate:** Harvey's own `rubric_criterion.txt` prompt against the *original* `match_criteria`, split by fact and analysis
-- **faithfulness:** Haiku checks every claim against the evidence
-- **abstention rate**
+Metrics (eval v3, see [Eval v3](#eval-v3-an-eval-that-can-tell-the-systems-apart); runs up to `test_v2` used a binary
+Haiku faithfulness verdict instead of the claim check):
+- **Harvey-judge pass rate:** Harvey's own `rubric_criterion.txt` prompt against the *original* `match_criteria`, split by fact and analysis; where the two systems' verdicts disagree, both answers are judged twice more and the majority of 3 counts
+- **claim support / material errors / faithful:** Sonnet lists the answer's factual claims about the matter and checks each against the evidence it was given; `faithful` = no *material* unsupported or contradicted claim
+- **pairwise preference:** where the two answers differ, Sonnet picks the better one (seeded random order)
+- **key-fact recall:** share of the item's verbatim key facts in the answer (no LLM)
+- **abstention and hedge rates**
 - **evidence-has-gold:** retrieval recall inside the full system
-- **evidence words:** what CRAG refinement removes
-- **LLM calls and latency per question**
-- **route distribution**
+- **evidence words, LLM calls and latency per question, route distribution**
 
 Every eval item is a traced span (`eval.item`), so failures can be opened in Phoenix.
 
-**Long runs and the subscription limit.** The test eval is ~1,400 Claude calls (5c) plus ~800 (5d, 5e), more than one
-subscription session. A session-limit error (`llm.QuotaError`) is raised at once instead of being retried, the run
+**Long runs and the subscription limit.** The comparison intentionally omits naive RAG: its earlier numbers are known,
+and rerunning it would add about 25% more calls. A full eval still spans more than one subscription session. A
+session-limit error (`llm.QuotaError`) is raised at once instead of being retried, the run
 stops scheduling new questions, and the unfinished ones are not recorded. `resume=True` (`--resume`) keeps every
 finished answer and runs only the missing (question, system) pairs, so the notebook cell is simply re-run after the
-reset. On `main`, such errors were retried, recorded as failures, and the run continued: 18 of 24 runs of one test
-were lost that way.
+reset. A manifest binds every resumable run to its questions, systems, index, models and source hash; fresh runs clear
+old rejudge/pairwise sidecars, and incomplete post-passes cannot be reported as final. On `main`, quota errors were
+retried and recorded as failures: 18 of 24 runs of one test were lost that way.
 
 ## Unfaithful-answer patterns
 The agent's 15 unfaithful answers in the final `main` run (faithfulness 0.50 vs. single-shot 0.633 and naive 0.70) fall
@@ -122,15 +125,110 @@ first 250 characters, so 48 of the 51 "abstentions" were partial answers that ci
 documents do not establish X. They show Y [2]"). An abstention now has to decline **and** cite nothing. By that rule
 the run had 3, the agent's forced abstains. `hedge_rate` tracks the over-hedging separately.
 
-**These 83 test questions were read to find the causes**, so they are no longer fully held out. The 43 test questions
-the run never reached are reported on their own as well (notebook cell after 5c).
+**These 83 test questions were read to find the causes**, so they are no longer fully held out. The second run
+(below) was read in full as well, so the single-hop test split now serves as a regression check; the clean comparison
+is the hard sets, built after the agent was frozen.
+
+## Second test run: why the eval could not separate the systems
+After the fixes above, the second run (`test_v2`, `header` index; records in
+`artifacts/eval/gen_test_v2.jsonl`) stopped with 109 single-shot and 108 agent answers (108 paired questions) and tied
+the two systems on those completed records:
+
+| system | pass | faithful (Haiku) | hedged | LLM calls / q | seconds / q |
+|---|---|---|---|---|---|
+| single-shot | 0.917 | 0.679 | 0.85 | 1.0 | 15.8 |
+| agent | 0.926 | 0.602 | 0.82 | 3.6 | 33.6 |
+
+Reading the 108 paired questions (`python -m hrag.eval.stats artifacts/eval/gen_test_v2.jsonl`, no LLM calls) showed
+that the eval could not have shown a difference, and that it also hid real agent weaknesses.
+
+**Why the eval could not separate them**
+1. **72% of the questions ran the same pipeline twice.** On 78 of 108 the agent routed "simple", scored ≥ 0.92 in round
+   0 and passed single-shot's exact 8 chunks into the identical prompt; only sampling noise could differ there.
+2. **Pass rate was saturated.** 98 questions passed for both and only 3 pairs disagreed (2 agent wins, 1 loss): pass
+   difference +0.9 points, 95% CI [−2.0, +4.1] (bootstrap over matters). On the 94 questions the audit
+   (below) marks `supported`, single-shot passed 91 and the agent 92.
+3. **The faithfulness verdict was noise.** On the 78 identical-input questions the two verdicts disagreed 34 times (44%);
+   independent coin flips at p ≈ 0.68 disagree 43.5% of the time. A binary "any unsupported claim" over ~600-word
+   answers flips on one minor slip (a title inferred from a file name, "SaaS" in a heading). The −8.3-point gap has a
+   95% CI of [−16.3, 0.0].
+4. **Some rubrics contradict the documents.** For C-032 the draft SPA's §6.1(b)(xii) does restrict accounting changes;
+   for C-051 §7.2(c) is a standalone no-MAE condition. Both systems answered correctly and both failed: the judge never
+   sees the documents. The audit finds 5 such items among the 126.
+5. **The judge was inconsistent.** On C-021 both answers omitted the same fact (the employer's SOE status); the agent's
+   passed and single-shot's failed.
+6. **Retrieval had no headroom.** Single-shot's top 8 held a gold chunk for 93% of the labelled questions, and all 6
+   misses still passed. Of the 7 questions both systems failed, 2 have contradicted rubrics, 3 turn on outside legal
+   judgment (both hedged), 1 needs the whole SPA section (C-052) and 1 is a retrieval failure (C-022). The questions
+   are single-hop, and Adaptive-RAG (Jeong et al., 2024) finds that multi-step retrieval pays only on multi-hop ones.
+
+**What the agent got wrong** (fixed on this branch, [04](04-agentic-module.md#changes-after-the-second-test-run))
+7. **The rewrite loop never changed a result.** 33 sub-questions were retried: none became `correct`, and 27 had the
+   identical best score in all 3 rounds. The reranker scores the same sub-question, so the rewrite finds the same top
+   chunk again. `ambiguous` also kept only the grader's picks: less evidence than single-shot (e.g. 481 vs 1,835 words).
+8. **No link-following (C-022).** "Zhonghe Provincial Semiconductor Manufacturing Co. is a principal subsidiary of
+   Zhonghe PSIC" is stated in `shenlan-fund-lpa-summary` chunk 5. The plan was written before any evidence was seen,
+   and the Haiku sufficiency check answered "sufficient".
+9. **Generic planning (C-039).** The planner wrote five textbook Daubert sub-questions and never searched the question
+   itself; single-shot searched it, found the priority ranking and passed.
+10. **Complex answers were less faithful:** 16 chunks (~4,300 words), 0.25 faithful vs 0.56 for single-shot (n = 16).
+
+## Eval v3: an eval that can tell the systems apart
+The design follows the usual requirements for agent evals: tasks that are **difficult and discriminative** (not
+saturated), **accurate** (audited), and results with **confidence signals** (paired, clustered, re-judged).
+
+**Shared-path reuse (common random numbers).** On each question single-shot runs first. When the agent ends up with
+single-shot's evidence, chunk for chunk, and adds no note, its generation prompt is byte-identical, so single-shot's
+answer is a valid sample of the agent's call: the agent reuses it and its judgments (`reused: true`). This removes the
+pure noise of item 1 from the paired difference and saves ~70% of the agent's generation and judge calls on the
+single-hop split. Its cost still counts the generation call it would make in production. Results are reported on all
+questions and on the questions where the agent took its own path.
+
+**Audit of the rubric items** (`build_qa audit`, 124 Sonnet calls). For each test item, Sonnet sees the question, the
+criterion, the expected answer and up to 24 passages of the matter (the gold chunks, a deep BM25 search for the
+question and expected answer, and key-fact matches; never our hybrid retriever) and classifies the expected answer:
+
+| audit | items | examples |
+|---|---|---|
+| supported | 111 | |
+| contradicted | 5 | C-032, C-051 (above); a ROFR section number the operating agreement contradicts; a remedies item treating real concerns as standard |
+| outside_knowledge | 7 | the FOCI instrument (C-008), the mandatory CFIUS declaration (C-017), CFIUS's view of a voluntary self-disclosure |
+| not_determinable | 3 | the absence of an environmental rep (C-052), whether Harwell is domestic (C-035) |
+
+The headline excludes `contradicted`; every audit stratum is reported separately.
+
+**Hard sets** (`build_hard.py`, `artifacts/eval/qa_hard.jsonl`): built from the documents after the agent was frozen
+(commit `7ae4f69`; each item records `built_with`), from the 30 matters outside dev, at most 2 items per matter and kind.
+A writer call proposes each item and a separate verifier checks the expected answer, every proposed fact, each passage
+alone, and every leave-one-passage-out subset. The headline run refuses to start until it has 25 current-version items
+of each kind:
+
+<!-- HARD:START -->
+| kind | built from | accepted only if | tests |
+|---|---|---|---|
+| **bridge** | an entity (defined term, company or titled person) named in ≥ 2 documents but ≤ 6 chunks; the least-overlapping pair of chunks from two documents; the question must not name or alias the entity | neither passage alone answers it; removing either passage makes the answer incomplete; every fact is supported; the question doesn't give away the link | following a link learned mid-search |
+| **aspect** | a seed chunk and the most similar chunk of two other documents (TF-IDF cosine 0.12–0.45) | removing any one passage makes the answer incomplete; every fact is supported; all three together answer naturally | decomposition coverage |
+<!-- HARD:END -->
+
+The link behind C-022 (Zhonghe / Dr. Fang), which motivated the agent's link-finding step, is excluded from the bridge
+candidates. Answers are judged against the selected source passages and expected answer (`judge_reference`: correct /
+partial / incorrect, plus per-fact coverage). `all_gold_in_evidence` means that all selected source chunks were
+retrieved; equivalent support may exist elsewhere. The earlier 24-passage `absent` builder is experimental and is not
+part of the headline hard run: it could establish a retrieval miss, not corpus-wide absence. Abstention remains an
+optional cross-matter diagnostic.
+
+**Statistics** (`stats.py`): per-question paired differences; 95% CIs from a bootstrap that resamples whole matters
+(questions from one matter's rubric are not independent); binary and pairwise p-values use a paired randomization that
+flips every question in a matter together. Reports include the number of independent matter clusters. Pairwise judges
+see a separately numbered evidence block for each answer, so each answer's `[n]` citations retain their meaning.
+`run_eval report --tags test_v3 hard_v2` prints the tables from completed saved runs without LLM calls.
 
 ## Results
 Run on a Colab T4 with `notebooks/02_demo_and_eval.ipynb`. The JSON outputs are in `artifacts/eval/`.
 
 > **Branch `agent-improvements`:** the tables below are the `main` results (dev questions, old corpus, Qwen2.5-3B
-> contexts). The first test run on this branch is analysed above; the tables will be replaced by the rerun after its
-> fixes (test split, 44-matter corpus, Qwen3.5-4B contexts).
+> contexts). The two test runs on this branch are analysed above; the eval v3 run (`test_v3` and the strict hard sets,
+> `hard_v2`) replaces these tables once it has run.
 
 <!-- RESULTS:START -->
 **Retrieval** (57 questions with silver labels; searched within the matter's data room unless marked corpus-wide; `foreign@5` = share of top-5 hits from other matters)
@@ -283,6 +381,8 @@ Run on a Colab T4 with `notebooks/02_demo_and_eval.ipynb`. The JSON outputs are 
 - Silver labels can miss gold chunks that paraphrase a fact ("fifty percent") and can credit chunks that mention a figure in passing. Fine for relative comparisons; absolute recall is approximate.
 - One judge model (Claude), not Harvey's dual-judge profile (Claude + GPT), and our answers are short QA answers rather than full memos. Criteria written for memos are judged "in substance" for the question asked.
 - The sample is small (tens of questions), so differences of a few points are noise.
-- On `main`, the CRAG thresholds were calibrated on the same questions used in the generation eval, and the refinement fix was confirmed on the same 30 questions that exposed it. **This branch separates them:** calibration and every tuning decision use dev; the test split (16 matters never used) is only evaluated.
-- The prompt rules on this branch were written from the dev answers' failures; the test split is where they can be judged fairly.
-- **Run-to-run noise** (measured on unchanged pipelines): about ±1 question of pass rate and about ±7 points of faithfulness at n = 30.
+- On `main`, the CRAG thresholds were calibrated on the same questions used in the generation eval, and the refinement fix was confirmed on the same 30 questions that exposed it. This branch calibrates on dev, but the later test-driven diagnosis means `test` is now a regression set; only the post-freeze hard questions are clean with respect to the current agent.
+- The prompt rules on this branch were written from dev failures; later retrieval/planning fixes were motivated by test C-022 and C-039.
+- **Run-to-run noise** (measured on unchanged pipelines): about ±1 question of pass rate and about ±7 points of faithfulness at n = 30. On `test_v2`, two runs of the identical pipeline gave different binary faithfulness verdicts on 44% of questions, which is why eval v3 reuses identical-input answers and checks claims instead.
+- The hard sets are written and verified by Claude, not by lawyers; a sample should be spot-checked by a human. They use previously seen matters but post-freeze questions, so they test new questions rather than matter-level generalization. The audit is an LLM judgment as well.
+- The single-hop test split was read during the diagnosis of both test runs, and two of its questions (C-022, C-039) motivated agent fixes, so it is a regression check now, not a held-out test.

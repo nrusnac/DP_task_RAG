@@ -13,7 +13,7 @@ from . import prompts as P
 from .graph import _matters, retriever
 
 
-async def single_shot(question: str, task_id: str | None, variant: str = "ctx", mode: str = "hybrid",
+async def single_shot(question: str, task_id: str | None, variant: str = CFG.default_variant, mode: str = "hybrid",
                       rerank: bool = True) -> dict:
     t0, ctr = time.perf_counter(), llm.start_counter()
     hits = retriever(variant).search(question, task_id=task_id, mode=mode, rerank=rerank)

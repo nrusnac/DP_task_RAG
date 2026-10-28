@@ -30,7 +30,7 @@ class Hit:
 
 
 class HybridRetriever:
-    def __init__(self, variant: str = "ctx", cfg=CFG):
+    def __init__(self, variant: str = CFG.default_variant, cfg=CFG):
         import bm25s
         self.cfg, self.variant = cfg, variant
         self.df: pd.DataFrame = load_chunks(cfg)

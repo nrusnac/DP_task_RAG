@@ -335,10 +335,12 @@ def test_rejudge_majority_and_pairwise_order(tmp_path, monkeypatch):
     import json
     from hrag.eval import judge, run_eval
     monkeypatch.setattr(run_eval, "EVAL_DIR", tmp_path)
-    rec = lambda q, s, v, ans, reused=False: dict(qid=q, task_id="t", system=s, kind="fact", verdict=v,  # noqa: E731
-                                                  answer=ans, reused=reused, evidence_ids=[])
-    lines = [rec("q1", "single_shot", "pass", "A1"), rec("q1", "agent", "fail", "B1"),
-             rec("q2", "single_shot", "pass", "A2"), rec("q2", "agent", "pass", "A2", reused=True)]
+    rec = lambda q, s, v, ans, ev, reused=False: dict(qid=q, task_id="t", system=s, kind="fact", verdict=v,  # noqa: E731
+                                                      answer=ans, reused=reused, evidence_ids=ev)
+    lines = [rec("q1", "single_shot", "pass", "A1", ["a", "b"]),
+             rec("q1", "agent", "fail", "B1", ["c", "a"]),
+             rec("q2", "single_shot", "pass", "A2", ["a"]),
+             rec("q2", "agent", "pass", "A2", ["a"], reused=True)]
     (tmp_path / "gen_t.jsonl").write_text("".join(json.dumps(r) + "\n" for r in lines))
     items = {q: dict(qid=q, task_id="t", question="?", expected_answer="x") for q in ("q1", "q2")}
 
@@ -352,13 +354,125 @@ def test_rejudge_majority_and_pairwise_order(tmp_path, monkeypatch):
     assert {r["system"]: r.get("verdict_majority") for r in records if r["qid"] == "q1"} == \
         {"single_shot": "pass", "agent": "pass"}
 
-    async def fake_pairwise(question, reference, first, second, evidence):
+    seen_evidence = []
+
+    async def fake_pairwise(question, reference, first, second, first_evidence, second_evidence):
+        seen_evidence.append((first, [e["chunk_id"] for e in first_evidence],
+                              second, [e["chunk_id"] for e in second_evidence]))
         return {"winner": "1" if first == "B1" else "2", "reasoning": ""}     # always prefers the agent's answer
 
     monkeypatch.setattr(judge, "judge_pairwise", fake_pairwise)
+    monkeypatch.setattr(run_eval, "passages", lambda ids: [dict(chunk_id=i, text=i) for i in ids])
     asyncio.run(run_eval.pairwise("t", items, lambda it: ""))
     prefs = [json.loads(l) for l in open(tmp_path / "pairwise_t.jsonl")]
     assert [(p["qid"], p["winner"]) for p in prefs] == [("q1", "agent")]    # q2 reused: identical answers
+    assert {seen_evidence[0][0]: seen_evidence[0][1], seen_evidence[0][2]: seen_evidence[0][3]} == \
+        {"A1": ["a", "b"], "B1": ["c", "a"]}                              # citations keep local numbering
+
+
+def test_fresh_run_clears_sidecars_and_resume_checks_manifest(tmp_path, monkeypatch):
+    import json
+    from hrag.agent import graph
+    from hrag.eval import run_eval
+    monkeypatch.setattr(run_eval, "EVAL_DIR", tmp_path)
+    monkeypatch.setattr(CFG, "artifacts_dir", tmp_path / "artifacts")
+    monkeypatch.setattr(CFG, "index_dir", tmp_path / "index")
+    CFG.artifacts_dir.mkdir()
+    CFG.index_dir.mkdir()
+    (CFG.artifacts_dir / "chunks.parquet").write_bytes(b"corpus")
+    (CFG.index_dir / "dense_header.npy").write_bytes(b"dense")
+    (CFG.index_dir / "bm25_header").mkdir()
+    (CFG.index_dir / "bm25_header" / "index.npy").write_bytes(b"sparse")
+    run_eval._source_sha.cache_clear()
+    graph.load_calibration.cache_clear()
+    for name in ("gen_t.jsonl", "rejudge_t.jsonl", "pairwise_t.jsonl", "summary_gen_t.json", "compare_t.json"):
+        (tmp_path / name).write_text("stale")
+    items = [dict(qid="q", question="Q", expected_answer="A", gold=[])]
+    run_eval._prepare_run("t", "generation", "header", ["single_shot", "agent"], items, resume=False)
+    assert not any((tmp_path / name).exists() for name in ("gen_t.jsonl", "rejudge_t.jsonl", "pairwise_t.jsonl"))
+    manifest = json.loads((tmp_path / "manifest_t.json").read_text())
+    assert manifest["variant"] == "header" and manifest["version"] == 2
+    assert manifest["post_required"] and manifest["post_requested"]
+    with pytest.raises(RuntimeError, match="configuration changed"):
+        run_eval._prepare_run("t", "generation", "header", ["single_shot", "agent"],
+                              [dict(qid="other", question="Q", expected_answer="A", gold=[])], resume=True)
+    (CFG.index_dir / "dense_header.npy").write_bytes(b"changed")
+    with pytest.raises(RuntimeError, match="retriever_sha256"):
+        run_eval._prepare_run("t", "generation", "header", ["single_shot", "agent"], items, resume=True)
+    graph.load_calibration.cache_clear()
+
+
+def test_comparison_requires_post_passes_and_manifest(tmp_path, monkeypatch):
+    from hrag.eval import run_eval
+    systems = ["single_shot", "agent"]
+    assert run_eval._completion_state(0, False, systems, None, None) == (False, False, "post_skipped")
+    assert run_eval._completion_state(0, True, systems, 0, 0) == (True, True, "complete")
+    assert run_eval._completion_state(0, False, ["agent:simple"], None, None) == (True, False, "complete")
+    monkeypatch.setattr(run_eval, "EVAL_DIR", tmp_path)
+    with pytest.raises(RuntimeError, match="no manifest"):
+        run_eval.report(["legacy"])
+
+
+def test_calibration_does_not_mutate_global_thresholds(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from hrag.agent import graph
+    from hrag.eval import run_eval
+
+    class FakeRetriever:
+        task_ids = ["a", "b"]
+
+        def search(self, question, task_id, top):
+            return [SimpleNamespace(score=.8, chunk_id="gold")]
+
+    monkeypatch.setattr(graph, "retriever", lambda variant: FakeRetriever())
+    monkeypatch.setattr(run_eval, "load_qa", lambda split: [dict(question="Q", task_id="a", gold=["gold"])])
+    monkeypatch.setattr(run_eval, "other_matter", lambda rng, task_id, tasks: "b")
+    monkeypatch.setattr(run_eval, "thresholds", lambda pos, neg: (.4, .9))
+    monkeypatch.setattr(run_eval, "EVAL_DIR", tmp_path)
+    before = (CFG.crag_high, CFG.crag_low)
+    run_eval.calibrate("header")
+    assert (CFG.crag_high, CFG.crag_low) == before
+    graph.load_calibration.cache_clear()
+
+
+def test_header_default_and_variant_specific_calibration(tmp_path, monkeypatch):
+    import json
+    from hrag.eval import run_eval
+    monkeypatch.setattr(CFG, "index_dir", tmp_path / "index")
+    CFG.index_dir.mkdir()
+    (CFG.index_dir / "dense_header.npy").touch()
+    (CFG.index_dir / "dense_ctx.npy").touch()
+    assert run_eval.default_variant() == "header"
+
+    monkeypatch.setattr(CFG, "artifacts_dir", tmp_path / "artifacts")
+    (CFG.artifacts_dir / "eval").mkdir(parents=True)
+    (CFG.artifacts_dir / "eval" / "crag_calibration.json").write_text(json.dumps(
+        {"variant": "header", "suggested": {"crag_high": 0.91, "crag_low": 0.61}}))
+    graph.load_calibration.cache_clear()
+    assert graph.load_calibration("header") == {"crag_high": 0.91, "crag_low": 0.61}
+    assert graph.load_calibration("ctx") == {"crag_high": CFG.crag_high, "crag_low": CFG.crag_low}
+    graph.load_calibration.cache_clear()
+
+
+def test_strict_hard_verifier_requires_every_passage(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from hrag import llm
+    from hrag.eval import build_hard
+    rows = [SimpleNamespace(chunk_id="a", doc_id="d1", section="s", kind="para", text="A"),
+            SimpleNamespace(chunk_id="b", doc_id="d2", section="s", kind="para", text="B")]
+    written = dict(question="Q", expected_answer="A and B", facts=["A", "B"], key_facts=["A", "B"])
+    verdict = dict(alone=[False, False], without_each=[False, True], facts_supported=[True, True],
+                   together_ok=True, link_hidden=True, gives_away=False, note="B is redundant")
+
+    async def fake_complete(*args, **kwargs):
+        return verdict
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    assert asyncio.run(build_hard._verify_multi(written, rows, ["A", "B"], {})) is None
+    verdict["without_each"] = [False, False]
+    accepted = asyncio.run(build_hard._verify_multi(written, rows, ["A", "B"], {}))
+    assert accepted["verification_version"] == 2 and accepted["gold"] == ["a", "b"]
 
 
 def test_overmatched_facts_go_to_llm_labelling():

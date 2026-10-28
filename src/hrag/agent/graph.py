@@ -51,6 +51,8 @@ class State(TypedDict, total=False):
     matter: str
     policy: str          # adaptive | simple | complex (forced routes, for the ablation)
     variant: str         # index variant: raw | header | ctx (LangGraph drops undeclared keys)
+    crag_high: float     # calibration for this index variant
+    crag_low: float
     reuse: dict | None   # eval only: single-shot's {evidence_ids, answer} for the same question (see generate)
     route: str
     route_reason: str
@@ -64,21 +66,26 @@ class State(TypedDict, total=False):
 
 
 @lru_cache(maxsize=2)
-def retriever(variant: str = "ctx") -> HybridRetriever:
+def retriever(variant: str = CFG.default_variant) -> HybridRetriever:
     return HybridRetriever(variant)
 
 
-@lru_cache(maxsize=1)
-def load_calibration() -> dict:
-    """Use CRAG thresholds calibrated by `run_eval calibrate` (positives vs. cross-matter negatives) when available.
-    HRAG_CRAG_HIGH / HRAG_CRAG_LOW environment variables take precedence."""
+@lru_cache(maxsize=3)
+def load_calibration(variant: str = CFG.default_variant) -> dict:
+    """Thresholds calibrated for this index variant. Environment overrides win independently; a calibration file
+    made for another variant is never applied (reranker score distributions are variant-specific)."""
     import os
     path = CFG.artifacts_dir / "eval" / "crag_calibration.json"
-    if path.exists() and not os.environ.get("HRAG_CRAG_HIGH"):
-        sug = json.loads(path.read_text()).get("suggested", {})
-        CFG.crag_high = float(sug.get("crag_high", CFG.crag_high))
-        CFG.crag_low = float(sug.get("crag_low", CFG.crag_low))
-    return dict(crag_high=CFG.crag_high, crag_low=CFG.crag_low)
+    high, low = CFG.crag_high, CFG.crag_low
+    if path.exists():
+        saved = json.loads(path.read_text())
+        if saved.get("variant") == variant:
+            sug = saved.get("suggested", {})
+            if not os.environ.get("HRAG_CRAG_HIGH"):
+                high = float(sug.get("crag_high", high))
+            if not os.environ.get("HRAG_CRAG_LOW"):
+                low = float(sug.get("crag_low", low))
+    return dict(crag_high=high, crag_low=low)
 
 
 @lru_cache(maxsize=1)
@@ -126,7 +133,7 @@ async def plan(state: State) -> dict:
     never searched the question, and lost a question single-shot passed (docs/05, "Second test run")."""
     question = state["question"]
     s0 = _new_subq(0, question)
-    hits = retriever(state.get("variant", "ctx")).search(question, task_id=state.get("task_id"))
+    hits = retriever(state.get("variant", CFG.default_variant)).search(question, task_id=state.get("task_id"))
     s0.update(hits=hits, best=max((h.score for h in hits), default=0.0), status="retrieved")
     out = await llm.complete(P.PLAN.format(matter=state["matter"], question=question, found=_first_look(hits)),
                              system=P.SYSTEM, model=CFG.strong_llm, schema=P.PLAN_SCHEMA, purpose="plan")
@@ -137,7 +144,7 @@ async def plan(state: State) -> dict:
 
 
 async def retrieve(state: State) -> dict:
-    R = retriever(state.get("variant", "ctx"))
+    R = retriever(state.get("variant", CFG.default_variant))
     subqs = [dict(s) for s in state["subqs"]]
     for s in subqs:
         if s["status"] != "pending":
@@ -167,15 +174,16 @@ async def grade(state: State) -> dict:
     hits, as when it is confident (keeping only the grader's picks left the agent with less evidence than single-shot,
     e.g. 481 vs 1,835 words). A rewrite round sees only new chunks and adds just the ones the grader accepts."""
     subqs = [dict(s) for s in state["subqs"]]
+    high, low = state.get("crag_high", CFG.crag_high), state.get("crag_low", CFG.crag_low)
     log = list(state.get("log") or [])
     todo = []
     for s in subqs:
         if s["status"] != "retrieved":
             continue
         last = s["rounds"] >= CFG.max_corrective_rounds
-        if s["rounds"] == 0 and s["best"] >= CFG.crag_high:  # confident: keep all top hits, as single-shot does
+        if s["rounds"] == 0 and s["best"] >= high:  # confident: keep all top hits, as single-shot does
             s["status"], s["keep"] = "correct", s["hits"]
-        elif s["best"] < CFG.crag_low and not last:
+        elif s["best"] < low and not last:
             s["status"], s["keep"] = "incorrect", []
         else:
             todo.append(s)
@@ -193,7 +201,7 @@ async def grade(state: State) -> dict:
             elif s["rounds"] == 0:
                 s["status"], s["keep"] = "ambiguous", s["hits"]
             else:
-                s["status"] = "correct" if s["best"] >= CFG.crag_high else "ambiguous"
+                s["status"] = "correct" if s["best"] >= high else "ambiguous"
                 s["keep"] = [s["hits"][i - 1] for i in rel]
     for s in subqs:
         if s["status"] in ("correct", "ambiguous", "incorrect") and s.get("_logged_round") != s["rounds"]:
@@ -384,14 +392,15 @@ def build_graph():
 
 
 # --------------------------------------------------------------------------------------------- public API
-async def answer(question: str, task_id: str | None = None, policy: str = "adaptive", variant: str = "ctx",
+async def answer(question: str, task_id: str | None = None, policy: str = "adaptive",
+                 variant: str = CFG.default_variant,
                  reuse: dict | None = None) -> dict[str, Any]:
     """reuse (eval only): single-shot's {"evidence_ids", "answer"} for this question, see generate()."""
     t0 = time.perf_counter()
     ctr = llm.start_counter()
-    load_calibration()
+    calibration = load_calibration(variant)
     state = State(question=question, task_id=task_id, matter=_matters().get(task_id, "whole corpus"),
-                  policy=policy, variant=variant, reuse=reuse, log=[], subqs=[], iteration=0)
+                  policy=policy, variant=variant, reuse=reuse, log=[], subqs=[], iteration=0, **calibration)
     with tracing.span("agent.answer", kind="AGENT", **{"input.value": question, "task_id": task_id or "corpus",
                                                        "policy": policy, "variant": variant}) as sp:
         out = await build_graph().ainvoke(state, {"recursion_limit": 60})

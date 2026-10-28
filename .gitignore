@@ -9,3 +9,6 @@ data/raw/
 data/index/
 runs/
 RAG_CONCEPTS.md
+eval_results*.zip
+artifacts/contexts_qwen*.jsonl
+artifacts/eval/qa_hard_unverified.jsonl

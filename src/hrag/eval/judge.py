@@ -154,14 +154,17 @@ Ignore length and formatting unless they hide or omit the answer.
 
 Question: {question}
 {reference}
-Documents (everything either system retrieved):
-{evidence}
-
 Answer 1:
 {first}
 
+Evidence retrieved for Answer 1 (its citation numbers refer to this block):
+{first_evidence}
+
 Answer 2:
 {second}
+
+Evidence retrieved for Answer 2 (its citation numbers refer to this block):
+{second_evidence}
 
 Which answer is better overall: "1", "2", or "tie" (only when neither is better in a way that matters)?"""
 PAIRWISE_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["reasoning", "winner"],
@@ -169,12 +172,14 @@ PAIRWISE_SCHEMA = {"type": "object", "additionalProperties": False, "required": 
                                   "winner": {"type": "string", "enum": ["1", "2", "tie"]}}}
 
 
-async def judge_pairwise(question: str, reference: str, first: str, second: str, evidence: list[dict],
+async def judge_pairwise(question: str, reference: str, first: str, second: str,
+                         first_evidence: list[dict], second_evidence: list[dict],
                          model: str | None = None) -> dict:
     """reference: a line such as 'Reference answer: ...' (may be empty). Returns {"winner": "1"|"2"|"tie", ...}."""
     out = await llm.complete(PAIRWISE_PROMPT.format(question=question, reference=reference,
-                                                    evidence=numbered(evidence), first=first or "(empty)",
-                                                    second=second or "(empty)"),
+                                                    first=first or "(empty)", second=second or "(empty)",
+                                                    first_evidence=numbered(first_evidence),
+                                                    second_evidence=numbered(second_evidence)),
                              system=JUDGE_SYSTEM, model=model or CFG.strong_llm, schema=PAIRWISE_SCHEMA,
                              purpose="judge_pairwise")
     return dict(winner=out.get("winner"), reasoning=out.get("reasoning", ""))

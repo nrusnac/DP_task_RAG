@@ -59,6 +59,7 @@ class Config:
     strong_llm: str = _env("STRONG_LLM", "sonnet")  # planning, generation, judge
 
     # retrieval
+    default_variant: str = _env("DEFAULT_VARIANT", "header")
     dense_k: int = 50
     bm25_k: int = 50
     rrf_k: int = 60

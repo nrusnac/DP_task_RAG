@@ -2,13 +2,14 @@
 
 Both systems answer the same questions, so each question gives a paired difference; questions come in clusters (about
 8 per matter, written from one matter's rubric), so the confidence interval comes from a bootstrap that resamples whole
-matters. Binary metrics also get the exact McNemar test on the discordant pairs, pairwise preferences a sign test.
+matters. Binary metrics and pairwise preferences use paired randomization that flips whole matter clusters.
 
     python -m hrag.eval.stats artifacts/eval/gen_test_v2.jsonl      # offline: no LLM calls
 """
 from __future__ import annotations
 
 import json
+import itertools
 import random
 import sys
 from collections import defaultdict
@@ -36,6 +37,23 @@ def cluster_bootstrap(diffs: dict[str, list[float]], n_boot: int = 4000, seed: i
         means.append(sum(xs) / len(xs))
     means.sort()
     return means[int(n_boot * alpha / 2)], means[int(n_boot * (1 - alpha / 2)) - 1]
+
+
+def cluster_randomization_p(diffs: dict[str, list[float]], n_perm: int = 20000, seed: int = 0) -> float:
+    """Two-sided paired randomization test that flips all question differences in a matter together. This preserves
+    within-matter dependence; question-level McNemar/sign tests do not."""
+    sums = [sum(diffs[k]) for k in sorted(diffs)]
+    observed = abs(sum(sums))
+    if not observed:
+        return 1.0
+    if len(sums) <= 16:
+        totals = [abs(sum(s * sign for s, sign in zip(sums, signs)))
+                  for signs in itertools.product((-1, 1), repeat=len(sums))]
+        return sum(t >= observed - 1e-12 for t in totals) / len(totals)
+    rng = random.Random(seed)
+    extreme = sum(abs(sum(s * rng.choice((-1, 1)) for s in sums)) >= observed - 1e-12
+                  for _ in range(n_perm))
+    return (extreme + 1) / (n_perm + 1)
 
 
 def by_question(records: list[dict]) -> dict[str, dict[str, dict]]:
@@ -67,12 +85,13 @@ def paired(pairs: dict[str, dict[str, dict]], metric: Callable[[dict], float | b
         diffs[k].append(x - y)
     lo, hi = cluster_bootstrap(diffs, n_boot)
     n = len(rows)
-    out = dict(n=n, a=round(sum(x for _, x, _ in rows) / n, 3), b=round(sum(y for _, _, y in rows) / n, 3),
+    out = dict(n=n, n_clusters=len(diffs), a=round(sum(x for _, x, _ in rows) / n, 3),
+               b=round(sum(y for _, _, y in rows) / n, 3),
                diff=round(sum(x - y for _, x, y in rows) / n, 3), ci95=[round(lo, 3), round(hi, 3)])
     if binary:
         only_a = sum(1 for _, x, y in rows if x and not y)
         only_b = sum(1 for _, x, y in rows if y and not x)
-        out.update(only_a=only_a, only_b=only_b, p=round(mcnemar_exact(only_a, only_b), 3))
+        out.update(only_a=only_a, only_b=only_b, p=round(cluster_randomization_p(diffs), 3))
     return out
 
 
@@ -101,15 +120,18 @@ METRICS: list[tuple[str, Callable[[dict], float | bool | None], bool]] = [
 
 
 def pairwise_summary(prefs: list[dict], a: str = "agent", b: str = "single_shot") -> dict:
-    """Win/tie/loss of `a` against `b` from pairwise judgments, with the sign test and the position check (how often the
-    answer shown first won: far from 0.5 means position bias)."""
+    """Win/tie/loss of `a` against `b`, with a matter-cluster randomization test and a position-bias check."""
     if not prefs:
         return {}
     w = sum(p["winner"] == a for p in prefs)
     l_ = sum(p["winner"] == b for p in prefs)
     decided = [p for p in prefs if p["winner"] in (a, b)]
     first_won = sum((p["winner"] == a) == bool(p["agent_first"]) for p in decided)
-    return dict(n=len(prefs), wins=w, ties=len(prefs) - w - l_, losses=l_, p=round(mcnemar_exact(w, l_), 3),
+    diffs: dict[str, list[float]] = defaultdict(list)
+    for p in prefs:
+        diffs[p.get("task_id") or p["qid"]].append(float(p["winner"] == a) - float(p["winner"] == b))
+    return dict(n=len(prefs), n_clusters=len(diffs), wins=w, ties=len(prefs) - w - l_, losses=l_,
+                p=round(cluster_randomization_p(diffs), 3),
                 first_shown_won=round(first_won / len(decided), 3) if decided else None)
 
 
