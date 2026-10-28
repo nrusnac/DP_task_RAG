@@ -322,9 +322,8 @@ async def build(kind: str, n: int = 25, seed: int = 13, show: int = 0) -> list[d
             break
         tried += len(wave)
         res = await asyncio.gather(*[one(*w) for w in wave], return_exceptions=True)
+        quota = next((r for r in res if isinstance(r, llm.QuotaError)), None)
         for r in res:
-            if isinstance(r, llm.QuotaError):
-                raise r
             if isinstance(r, Exception):
                 print("error:", repr(r)[:200], flush=True)
                 continue
@@ -339,6 +338,8 @@ async def build(kind: str, n: int = 25, seed: int = 13, show: int = 0) -> list[d
                 f.write(json.dumps(item) + "\n")
             need -= 1
         print(f"{kind}: tried {tried}, accepted {len(accepted)} (still needed {max(need, 0)})", flush=True)
+        if quota:  # accepted items are already saved: rerun after the reset to continue
+            raise quota
     for it in accepted[:show]:
         print(json.dumps({k: it[k] for k in ("qid", "question", "expected_answer", "facts", "gold")}, indent=1))
     print(json.dumps(dict(kind=kind, tried=tried, accepted=len(accepted),

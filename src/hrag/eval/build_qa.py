@@ -309,13 +309,15 @@ async def audit(split: str | None = "test", qids: list[str] | None = None) -> li
     kept, the verdict is stored as audit / audit_quote / audit_note."""
     _, chunks = _load_inputs()
     items = [dict(i, split=i.get("split", "dev")) for i in map(json.loads, open(QA_PATH))]
-    todo = [i for i in items if (i["qid"] in set(qids) if qids else split in (None, i["split"]))]
+    todo = [i for i in items if (i["qid"] in set(qids) if qids else split in (None, i["split"]) and not i.get("audit"))]
     res = await asyncio.gather(*[audit_item(i, chunks[chunks.task_id == i["task_id"]]) for i in todo],
                                return_exceptions=True)
-    new = {}
+    new, stopped = {}, sum(isinstance(r, llm.QuotaError) for r in res)
+    if stopped:  # results so far are still written: rerun after the reset to audit only the rest
+        print(f"STOPPED at a session limit: {stopped} items left -- rerun after the reset", flush=True)
     for i, r in zip(todo, res):
         if isinstance(r, llm.QuotaError):
-            raise r
+            continue
         if isinstance(r, Exception):
             print("audit error", i["qid"], repr(r)[:200])
             continue
