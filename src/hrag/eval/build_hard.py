@@ -32,6 +32,7 @@ from ..config import CFG
 from .build_qa import QA_PATH, _load_inputs, lexical_top
 
 HARD_PATH = CFG.artifacts_dir / "eval" / "qa_hard.jsonl"
+REJECTED_PATH = CFG.artifacts_dir / "eval" / "qa_hard_rejected.jsonl"  # never re-verified on a rerun
 VERIFICATION_VERSION = 2
 PER_MATTER = 2       # accepted items per matter and kind
 WAVE = 6             # candidates written + verified concurrently
@@ -170,7 +171,9 @@ def bridge_candidates(tc: pd.DataFrame, rng: random.Random, max_chunks: int = 6)
     rows = list(tc.itertuples())
     found: dict[str, list] = {}
     for r in rows:
-        for e in entities(r.text):
+        # Set iteration is hash-seed dependent. Sort before the seeded shuffle below so --first slices are stable
+        # across separate quota sessions and do not silently revisit another slice.
+        for e in sorted(entities(r.text)):
             found.setdefault(e, []).append(r)
     out = []
     for e, rs in found.items():
@@ -291,6 +294,31 @@ def load_hard() -> list[dict]:
     return [json.loads(l) for l in open(HARD_PATH)] if HARD_PATH.exists() else []
 
 
+def _candidate_key(cand: dict):
+    return tuple(r.chunk_id for r in cand["chunks"]) if "chunks" in cand else cand["question"]
+
+
+def _load_rejected() -> set:
+    """Load persisted candidate keys, failing with a useful line number if the append-only log is damaged."""
+    out = set()
+    if not REJECTED_PATH.exists():
+        return out
+    for line_no, line in enumerate(open(REJECTED_PATH), 1):
+        if not line.strip():
+            continue
+        try:
+            key = json.loads(line)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"malformed rejection log {REJECTED_PATH}:{line_no}: {e.msg}") from e
+        if isinstance(key, list) and all(isinstance(x, str) for x in key):
+            out.add(tuple(key))
+        elif isinstance(key, str):
+            out.add(key)
+        else:
+            raise ValueError(f"malformed rejection log {REJECTED_PATH}:{line_no}: expected string or string list")
+    return out
+
+
 def _commit() -> str:
     try:
         return subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
@@ -299,8 +327,10 @@ def _commit() -> str:
         return "unknown"
 
 
-async def build(kind: str, n: int = 25, seed: int = 13, show: int = 0) -> list[dict]:
+async def build(kind: str, n: int = 25, seed: int = 13, show: int = 0, first: int = 0) -> list[dict]:
     """Append accepted `kind` items to qa_hard.jsonl until it holds n of them."""
+    if first < 0:
+        raise ValueError("first must be non-negative")
     tasks, chunks = _load_inputs()
     titles = {t["task_id"]: t["title"] or t["task_id"] for t in tasks}
     dev = {json.loads(l)["task_id"] for l in open(QA_PATH) if json.loads(l).get("split", "dev") == "dev"}
@@ -310,7 +340,8 @@ async def build(kind: str, n: int = 25, seed: int = 13, show: int = 0) -> list[d
     for i in verified:
         if i["kind"] == kind:
             per_matter[i["task_id"]] = per_matter.get(i["task_id"], 0) + 1
-    used = {tuple(i["gold"]) for i in have} | {i["question"] for i in have}
+    used_candidates = {tuple(i["gold"]) for i in have} | _load_rejected()
+    used_questions = {i["question"] for i in have}
     need = n - sum(per_matter.values())
     rng = random.Random(f"{seed}:{kind}")
     matters = sorted(set(chunks.task_id) - dev)
@@ -325,14 +356,15 @@ async def build(kind: str, n: int = 25, seed: int = 13, show: int = 0) -> list[d
             mrng = random.Random(f"{seed}:{kind}:{t}")
             if kind == "bridge":
                 cands = [c for c in bridge_candidates(tc, mrng)
-                         if not any(x in c["entity"] for x in EXCLUDED_LINKS.get(t, ()))][:4]
+                         if not any(x in c["entity"] for x in EXCLUDED_LINKS.get(t, ()))][first:first + 4]
             elif kind == "aspect":
-                cands = aspect_candidates(tc, mrng)[:4]
+                cands = aspect_candidates(tc, mrng)[first:first + 4]
             else:
                 cands = await _absent_questions(tc, titles.get(t, t), mrng)
             for c in cands:
-                key = tuple(r.chunk_id for r in c["chunks"]) if "chunks" in c else c["question"]
-                if key not in used:
+                key = _candidate_key(c)
+                if key not in used_candidates and ("chunks" in c or c["question"] not in used_questions):
+                    used_candidates.add(key)  # do not schedule the same candidate twice in one process
                     yield t, tc, c
 
     async def one(t, tc, c):
@@ -353,13 +385,21 @@ async def build(kind: str, n: int = 25, seed: int = 13, show: int = 0) -> list[d
         tried += len(wave)
         res = await asyncio.gather(*[one(*w) for w in wave], return_exceptions=True)
         quota = next((r for r in res if isinstance(r, llm.QuotaError)), None)
-        for r in res:
+        fatal = next((r for r in res if isinstance(r, Exception)), None) if all(
+            isinstance(r, Exception) for r in res) else None
+        for w, r in zip(wave, res):
             if isinstance(r, Exception):
                 print("error:", repr(r)[:200], flush=True)
                 continue
             t, item = r
-            if item is None or need <= 0 or per_matter.get(t, 0) >= PER_MATTER:
+            c = w[2]
+            duplicate_question = item is not None and item["question"] in used_questions
+            if item is None or duplicate_question:
+                with open(REJECTED_PATH, "a") as f:
+                    f.write(json.dumps(list(_candidate_key(c)) if "chunks" in c else _candidate_key(c)) + "\n")
+            if item is None or duplicate_question or need <= 0 or per_matter.get(t, 0) >= PER_MATTER:
                 continue
+            used_questions.add(item["question"])
             per_matter[t] = per_matter.get(t, 0) + 1
             k = sum(1 for i in have + accepted if i["kind"] == kind)
             item = dict(qid=f"hard::{kind}::{t}::{k}", task_id=t, split="hard", kind=kind, **item, built_with=commit)
@@ -370,6 +410,8 @@ async def build(kind: str, n: int = 25, seed: int = 13, show: int = 0) -> list[d
         print(f"{kind}: tried {tried}, accepted {len(accepted)} (still needed {max(need, 0)})", flush=True)
         if quota:  # accepted items are already saved: rerun after the reset to continue
             raise quota
+        if fatal:  # authentication/configuration failures should not drain every candidate in the corpus
+            raise fatal
     for it in accepted[:show]:
         print(json.dumps({k: it[k] for k in ("qid", "question", "expected_answer", "facts", "gold")}, indent=1))
     print(json.dumps(dict(kind=kind, tried=tried, accepted=len(accepted),
@@ -383,9 +425,11 @@ if __name__ == "__main__":
     ap.add_argument("--kinds", nargs="+", default=["bridge", "aspect"])
     ap.add_argument("--n", type=int, default=25, help="items per kind")
     ap.add_argument("--show", type=int, default=0, help="print this many accepted items per kind")
+    ap.add_argument("--first", type=int, default=0,
+                    help="skip each matter's first N candidates (a later pass never re-verifies rejected ones)")
     a = ap.parse_args()
 
     async def main():  # one event loop: llm's semaphore is bound to the loop that first uses it
         for kind in a.kinds:
-            await build(kind, a.n, show=a.show)
+            await build(kind, a.n, show=a.show, first=a.first)
     asyncio.run(main())

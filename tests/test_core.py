@@ -498,3 +498,14 @@ def test_bridge_candidates_link_two_documents():
     cands = bridge_candidates(df, random.Random(0))
     assert [c["entity"] for c in cands] == ["Acme Widgets Ltd"]
     assert {r.doc_id for r in cands[0]["chunks"]} == {"bio", "lpa"}   # two different documents
+
+
+def test_hard_rejection_log_is_resumable_and_validated(tmp_path, monkeypatch):
+    import json
+    from hrag.eval import build_hard
+    monkeypatch.setattr(build_hard, "REJECTED_PATH", tmp_path / "rejected.jsonl")
+    build_hard.REJECTED_PATH.write_text(json.dumps(["a", "b"]) + "\n" + json.dumps("question") + "\n")
+    assert build_hard._load_rejected() == {("a", "b"), "question"}
+    build_hard.REJECTED_PATH.write_text("{truncated\n")
+    with pytest.raises(ValueError, match="rejection log .*:1"):
+        build_hard._load_rejected()
