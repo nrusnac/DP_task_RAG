@@ -49,6 +49,16 @@ Metrics:
 
 Every eval item is a traced span (`eval.item`), so failures can be opened in Phoenix.
 
+**Long runs and the subscription limit.** A session-limit error (`llm.QuotaError`) is raised at once instead of being
+retried, and the run stops scheduling new questions. `--resume` (`resume=True`) keeps every finished answer and runs only
+the missing (question, system) pairs, so a run that hit the limit is simply restarted after the reset. Before this, such
+errors were retried and recorded as failures: 18 of 24 runs of the `ctx` unanswerable test were lost that way.
+
+**Paired statistics** (`stats.py`, no LLM calls). Every system answers the same questions, so each question gives a
+paired difference. Questions come up to 8 per matter, from one matter's rubric, so they are not independent: the 95%
+confidence interval comes from a bootstrap that resamples whole matters, and binary metrics get a paired randomization
+test that flips the signs of whole matters together (exact for ≤ 16 matters). See [How sure are we?](#how-sure-are-we).
+
 ## Results
 Run on a Colab T4 with `notebooks/02_demo_and_eval.ipynb`. The JSON outputs are in `artifacts/eval/`.
 
@@ -168,7 +178,9 @@ Run on a Colab T4 with `notebooks/02_demo_and_eval.ipynb`. The JSON outputs are 
   - **Next step:** attach a table's caption to the table chunk, and for "list all" questions retrieve the whole section.
 - **What the fix cost:**
   - Evidence per answer rose from 336 to **1,201 words** (still **−46%** vs. single-shot's 2,227).
-  - The agent's faithfulness fell from 0.70 to **0.50**, more than the measured noise. With whole chunks the generator writes longer answers with more unlabelled characterisations (e.g. "It is a legend, not an access control"). Correctness was bought with some faithfulness. A claim-verification node, or stricter "Analysis:" labelling, is the next step.
+  - The agent's faithfulness fell from 0.70 to **0.50**: a 20-point paired drop, 95% CI [−37, −3] over matters, but
+    the matter-level randomization test gives p = 0.11, so it is borderline rather than established (see
+    [How sure are we?](#how-sure-are-we)). With whole chunks the generator writes longer answers with more unlabelled characterisations (e.g. "It is a legend, not an access control"). Correctness was bought with some faithfulness. A claim-verification node, or stricter "Analysis:" labelling, is the next step.
   - **3.7 LLM calls and 28 s** per question, vs. 1 call and 13 s.
 
 **Adaptive-RAG**
@@ -194,6 +206,51 @@ Run on a Colab T4 with `notebooks/02_demo_and_eval.ipynb`. The JSON outputs are 
 - **What it costs:** ~3.7× the LLM calls, ~2× the latency, and in its current form lower faithfulness.
 - **The accuracy foundation is the retrieval stack** (structure-aware chunks, hybrid + RRF, rerank, data-room scoping): even naive dense RAG scores 0.90 with this generator.
 
+## How sure are we?
+`python -m hrag.eval.stats <gen file> --a <system> --b <system>` on the committed records (no LLM calls). Diff = a − b;
+95% CI from a bootstrap over matters; p from the matter-level paired randomization test.
+
+| comparison (records) | questions / matters | pass diff [95% CI], p | faithful diff [95% CI], p | other paired differences |
+|---|---|---|---|---|
+| agent − single-shot (final run) | 30 / 13 | +3.3 [0.0, +10.0], p = 1.0 | −13.3 [−37.0, +6.2], p = 0.36 | evidence −1,026 words [−1,277, −728]; +2.7 LLM calls [+1.4, +4.2]; +15.6 s [+8.4, +22.0] |
+| single-shot − naive (final run) | 30 / 13 | +3.3 [0.0, +11.8], p = 1.0 | −6.7 [−26.7, +18.5], p = 0.84 | |
+| agent − naive (final run) | 30 / 13 | +6.7 [0.0, +16.0], p = 0.50 | −20.0 [−45.2, +12.5], p = 0.32 | |
+| agent after − before the refinement fix | 30 / 13 | +10.0 [0.0, +21.9], p = 0.50 | −20.0 [−37.1, −3.1], p = 0.11 | evidence +865 words [+664, +1,079] |
+| adaptive − always-simple (ablation) | 20 / 10 | 0.0, p = 1.0 | – | +2.0 LLM calls [+1.1, +3.0]; +16 s [+8, +25] |
+| adaptive − always-complex (ablation) | 20 / 10 | 0.0, p = 1.0 | – | −3.2 LLM calls [−5.3, −1.0]; −18 s [−28, −8] |
+
+What holds and what doesn't:
+- **No pass-rate or faithfulness difference between any two systems is significant.** With 30 questions from 13
+  matters, a 95% CI is about ±10 points wide for pass and about ±25 for faithfulness.
+- **The cost and context differences are significant:** the agent uses ~46% less evidence than single-shot, at ~3.7×
+  the calls; adaptive routing halves always-complex's calls at equal accuracy.
+- **The faithfulness drop after the refinement fix is borderline** (CI excludes 0, p = 0.11), and a deeper look at the
+  faithfulness judge (below) suggests much of its movement is judge noise.
+
+## What a deeper evaluation showed (follow-up work)
+A follow-up on the branch `agent-improvements` grew the corpus by 13 deal-regulatory matters, wrote 126 questions from
+16 matters that have no questions here, and ran single-shot and the agent on them. It found that **this eval design cannot
+separate the two systems**, for reasons that apply to the numbers above:
+1. **The faithfulness judge is mostly noise.** On 78 questions where the agent passed exactly single-shot's evidence
+   to the identical prompt, the binary Haiku verdict disagreed on 34 (44%), about what two coin flips at p ≈ 0.68
+   would give. One minor slip in a ~600-word answer (a title inferred from a file name) flips the whole verdict.
+2. **The pass rate is saturated.** Both systems pass ~95% of rubric questions, so only a handful of questions can
+   ever differ.
+3. **Some rubrics contradict the documents.** An audit against the data room found 5 of the 126 criteria contradicted
+   by the documents (both systems answered correctly and failed), and 7 that turn on outside legal judgment.
+4. **Most questions run the same pipeline twice.** On simple questions the agent retrieves exactly what single-shot
+   does, so the difference there is pure sampling noise.
+
+The fix was a different eval: the rubric items audited against the documents, a claim-level groundedness judge (only
+*material* errors count), a pairwise judge where the two answers differ (seeded random order), reuse of single-shot's
+answer where the agent's input is identical (removing the noise in item 4), and the matter-level statistics above.
+With it, on 126 questions from 16 matters, the pass rate still tied (agent +0.8 points, 95% CI [−1.6, +3.9]), but where
+the agent took its own path (48 questions) the pairwise judge preferred its answer **36 times vs. 8, with 4 ties**
+(p < 0.001, matter-level; the answer shown first won 48% of the time, so no position bias). Caveats: the judge is
+Sonnet grading Sonnet answers, and those test questions had been read during the diagnosis. That branch also changed
+the agent (the question itself is always searched first, the planner sees that search, link-finding sufficiency, a
+corrective round that looks only at new chunks); those changes are not on `main`.
+
 ## Findings that changed the design
 - **The silver labels favour BM25 by construction.** A chunk is gold *because* it contains the verbatim key facts, which is exactly what BM25 matches. So BM25's strong showing within a matter is partly a labelling artefact. Hybrid search is the safer default: it never loses much to the best single retriever and wins on Recall@5.
 - **Searching only within the matter makes the task easy** (~186 chunks per matter). Corpus-wide rows show the harder setting and the **contamination** (`foreign@5`: share of top-5 hits from *other* matters) that scoping removes.
@@ -202,7 +259,10 @@ Run on a Colab T4 with `notebooks/02_demo_and_eval.ipynb`. The JSON outputs are 
 ## Limitations
 - Silver labels can miss gold chunks that paraphrase a fact ("fifty percent") and can credit chunks that mention a figure in passing. Fine for relative comparisons; absolute recall is approximate.
 - One judge model (Claude), not Harvey's dual-judge profile (Claude + GPT), and our answers are short QA answers rather than full memos. Criteria written for memos are judged "in substance" for the question asked.
-- The sample is small (tens of questions), so differences of a few points are noise.
+- The sample is small (30 questions from 13 matters), so pass-rate differences under ~10 points and faithfulness
+  differences under ~25 points are within the 95% CI ([How sure are we?](#how-sure-are-we)).
+- The binary faithfulness judge is noisy: on identical inputs it disagreed with itself 44% of the time in the
+  follow-up ([above](#what-a-deeper-evaluation-showed-follow-up-work)). Treat faithfulness differences as indicative.
 - The CRAG thresholds are calibrated on the same questions used in the generation eval. It's only two parameters, so overfitting risk is low, but it is disclosed here.
 - **No held-out set for the fix.** The refinement fix was chosen after inspecting the first run's failures and confirmed on the same 30 questions. It targets a mechanism (don't shred chunks scored ≥ τ_high), not specific questions, but a fresh question sample would be the clean confirmation.
 - **Run-to-run noise** (measured on unchanged pipelines): about ±1 question of pass rate and about ±7 points of faithfulness at n = 30.

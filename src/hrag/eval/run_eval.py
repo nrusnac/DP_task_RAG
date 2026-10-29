@@ -3,6 +3,7 @@
     python -m hrag.eval.run_eval retrieval                       # no LLM calls: every retrieval configuration
     python -m hrag.eval.run_eval calibrate                       # CRAG thresholds from rerank-score distributions
     python -m hrag.eval.run_eval generation --n 40 --systems naive single_shot agent
+    python -m hrag.eval.run_eval generation --n 40 --systems naive single_shot agent --resume  # after a session limit
     python -m hrag.eval.run_eval generation --n 20 --systems agent:simple agent:complex agent   # Adaptive-RAG ablation
     python -m hrag.eval.run_eval negatives --n 12 --systems single_shot agent                   # unanswerable questions
 """
@@ -133,7 +134,10 @@ async def _run_system(system: str, it: dict, variant: str) -> dict:
 
 async def generation(n: int = 40, systems=("single_shot", "agent"), seed: int = 3, variant: str | None = None,
                      concurrency: int = 3, judge_faith: bool = True, qids: list[str] | None = None,
-                     tag: str | None = None) -> dict:
+                     tag: str | None = None, resume: bool = False) -> dict:
+    """resume=True keeps the finished answers of an earlier run with the same tag (errors are dropped and retried) and
+    runs only the missing (question, system) pairs. A subscription session limit (llm.QuotaError) stops the run at
+    once instead of being recorded as failures: rerun with resume=True after the reset."""
     from .judge import judge_correctness, judge_faithfulness
     variant = variant or available_variants()[-1]
     items = load_qa()
@@ -141,10 +145,18 @@ async def generation(n: int = 40, systems=("single_shot", "agent"), seed: int = 
     items = [i for i in items if i["qid"] in set(qids)] if qids else items[:n]
     sem = asyncio.Semaphore(concurrency)
     out_path = EVAL_DIR / f"gen_{tag or '_'.join(s.replace(':', '-') for s in systems)}.jsonl"
-    records = []
+    done = {}
+    if resume and out_path.exists():
+        for line in open(out_path):
+            r = json.loads(line)
+            if "error" not in r:
+                done[(r["qid"], r["system"])] = r
+    records, stop = list(done.values()), asyncio.Event()
 
     async def one(it, system):
         async with sem:
+            if stop.is_set():
+                return
             with tracing.span("eval.item", kind="CHAIN", **{"eval.system": system, "eval.qid": it["qid"],
                                                             "input.value": it["question"]}):
                 try:
@@ -163,6 +175,11 @@ async def generation(n: int = 40, systems=("single_shot", "agent"), seed: int = 
                                evidence_words=sum(len(e["text"].split()) for e in res["evidence"]),
                                llm_calls=res.get("llm_calls"), seconds=res.get("seconds"),
                                subqs=res.get("subqs"), log=res.get("log"), answer=res["answer"])
+                except llm.QuotaError as e:
+                    if not stop.is_set():
+                        print(f"STOPPED: {e} -- rerun with resume=True after the reset", flush=True)
+                    stop.set()
+                    return
                 except Exception as e:  # noqa: BLE001
                     rec = dict(qid=it["qid"], system=system, error=repr(e)[:300])
                 records.append(rec)
@@ -172,8 +189,15 @@ async def generation(n: int = 40, systems=("single_shot", "agent"), seed: int = 
                     f.write(json.dumps(rec, default=str) + "\n")
 
     EVAL_DIR.mkdir(parents=True, exist_ok=True)
-    out_path.unlink(missing_ok=True)
-    await asyncio.gather(*[one(it, s) for it in items for s in systems])
+    with open(out_path, "w") as f:  # a fresh file, or the earlier run's finished records only
+        for r in done.values():
+            f.write(json.dumps(r, default=str) + "\n")
+    todo = [(it, s) for it in items for s in systems if (it["qid"], s) not in done]
+    print(f"{len(items)} questions x {len(systems)} systems: {len(done)} done earlier, {len(todo)} to run", flush=True)
+    await asyncio.gather(*[one(it, s) for it, s in todo])
+    if stop.is_set():
+        left = len(items) * len(systems) - sum("error" not in r for r in records)
+        print(f"INCOMPLETE: {left} answers missing -- rerun with resume=True", flush=True)
     summary = summarize_generation(records)
     (EVAL_DIR / f"summary_{out_path.stem}.json").write_text(json.dumps(summary, indent=1))
     print(json.dumps(summary, indent=1))
@@ -263,6 +287,7 @@ if __name__ == "__main__":
     ap.add_argument("--systems", nargs="+", default=["single_shot", "agent"])
     ap.add_argument("--variant", default=None)
     ap.add_argument("--variants", nargs="+", default=None)
+    ap.add_argument("--resume", action="store_true", help="keep finished answers of an earlier run, run the rest")
     a = ap.parse_args()
     if a.what == "retrieval":
         retrieval(a.variants)
@@ -271,5 +296,5 @@ if __name__ == "__main__":
     elif a.what == "negatives":
         asyncio.run(negatives(a.n, a.systems, variant=a.variant))
     else:
-        asyncio.run(generation(a.n, a.systems, variant=a.variant))
+        asyncio.run(generation(a.n, a.systems, variant=a.variant, resume=a.resume))
     print("llm:", llm.STATS.snapshot())

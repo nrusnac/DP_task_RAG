@@ -1,4 +1,5 @@
 """Fast unit tests (no GPU, no LLM). Run: pytest -q"""
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -97,3 +98,55 @@ def test_llm_counter_isolated_per_task():
         return await asyncio.gather(fake_run(1), fake_run(3), fake_run(2))
 
     assert asyncio.run(main()) == [1, 3, 2]
+
+
+def test_paired_stats_cluster_by_matter():
+    from hrag.eval import stats
+    recs = []
+    for m in range(4):  # the agent passes one extra question in each of 4 matters
+        for k in range(3):
+            q = f"matter{m}::C-{k}"
+            recs += [dict(qid=q, system="agent", verdict="pass", faithful=True),
+                     dict(qid=q, system="single_shot", verdict="pass" if k else "fail", faithful=True)]
+    out = stats.compare(recs)
+    s = out["metrics"]["pass (Harvey rubric judge)"]
+    assert (out["n_questions"], out["n_matters"], s["only_a"], s["only_b"]) == (12, 4, 4, 0)
+    assert s["diff"] == 0.333 and s["ci95"] == [0.333, 0.333]
+    assert s["p"] == 0.125  # exact: 2 of the 16 sign patterns over 4 matters are as extreme
+    assert out["metrics"]["faithful (Haiku judge)"]["p"] == 1.0
+
+
+def test_quota_error_stops_generation_and_resume_runs_the_rest(tmp_path, monkeypatch):
+    import asyncio
+    from hrag import llm
+    from hrag.eval import judge, run_eval
+
+    assert llm._is_quota(RuntimeError("You've hit your session limit · resets 8:50am"))
+    assert not llm._is_quota(RuntimeError("429 rate_limit_error"))
+    items = [dict(qid=f"t::C-{i}", task_id="t", kind="fact", question="q", gold=[]) for i in range(4)]
+    monkeypatch.setattr(run_eval, "EVAL_DIR", tmp_path)
+    monkeypatch.setattr(run_eval, "load_qa", lambda: [dict(i) for i in items])
+    monkeypatch.setattr(run_eval, "available_variants", lambda: ["header"])
+    calls = []
+
+    async def fake_system(system, it, variant):
+        calls.append(it["qid"])
+        if quota and it["qid"] == "t::C-2":
+            raise llm.QuotaError("session limit")
+        return dict(answer="a", evidence=[], citations=[], llm_calls=1, seconds=0.1, route="simple")
+
+    async def fake_judge(it, answer):
+        return dict(verdict="pass", reasoning="")
+
+    monkeypatch.setattr(run_eval, "_run_system", fake_system)
+    monkeypatch.setattr(judge, "judge_correctness", fake_judge)
+    quota = True
+    asyncio.run(run_eval.generation(n=4, systems=["single_shot"], concurrency=1, judge_faith=False, tag="x"))
+    first = [json.loads(l) for l in open(tmp_path / "gen_x.jsonl")]
+    assert all("error" not in r for r in first) and "t::C-2" not in {r["qid"] for r in first}
+    calls.clear()
+    quota = False
+    s = asyncio.run(run_eval.generation(n=4, systems=["single_shot"], concurrency=1, judge_faith=False, tag="x",
+                                        resume=True))
+    assert sorted(calls) == sorted({i["qid"] for i in items} - {r["qid"] for r in first})
+    assert s["single_shot"]["n"] == 4

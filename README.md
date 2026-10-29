@@ -50,13 +50,14 @@ All design choices, with alternatives and measurements: [docs/07-decision-log.md
 - **Scoping to the matter's data room matters:** corpus-wide dense search puts ~17% of top-5 hits in *other* matters; hybrid + rerank cuts that to ~7%, and scoping to 0.
 - **Contextual Retrieval didn't measurably help on this eval.** The labels are verbatim-fact matches, a matter has only ~186 chunks, and the cheap deterministic header already gives most of the context. Reported as is.
 - **CRAG thresholds are measured with cross-matter negatives:** the top rerank score almost perfectly separates answerable from unanswerable questions (`ctx`: negatives median 0.011, positives p10 0.94). The error-free-band rule is outlier-sensitive (`ctx` τ 0.09 / 0.95, so 20% of retrievals are LLM-graded).
-- **Generation (final Colab run, 30 questions): agent 0.967, single-shot 0.933, naive 0.90.** That's a statistical tie: paired McNemar p = 1.0, and single-shot itself moved by one question between identical runs.
+- **Generation (final Colab run, 30 questions): agent 0.967, single-shot 0.933, naive 0.90.** That's a statistical tie: agent − single-shot +3.3 points, 95% CI [0.0, +10.0] over matters, p = 1.0 ([how sure are we](docs/05-evaluation.md#how-sure-are-we)), and single-shot itself moved by one question between identical runs.
   - The first run had the agent at 0.867. 3 of its 4 failures were **CRAG refinement over-pruning** list, enumeration and clause content, with the gold chunk retrieved and graded correct. The 4th is the chunking miss below.
   - The fix (pass clearly relevant hits whole) **flipped exactly the 3 predicted questions to pass, with no regressions**.
-  - Cost: 3.7 LLM calls vs. 1, and 46% less context than single-shot. Faithfulness fell after the fix (0.70 → 0.50).
+  - Cost: 3.7 LLM calls vs. 1, and 46% less context than single-shot (both significant). Faithfulness fell after the fix (0.70 → 0.50), but that is borderline (p = 0.11), and the binary faithfulness judge proved noisy (below).
 - **The one question every system fails** ("list all 25 custodians") is a **chunking issue**: each appendix table was split from the caption that says "custodians".
 - **Adaptive-RAG (final, 20 questions):** all policies score 0.90. Adaptive costs 3.45 calls vs. 6.6 for always-complex and 1.45 for always-simple. Its earlier one-question edge didn't reproduce.
 - **Unanswerable questions** (asked in the wrong matter's data room): single-shot declined 11/12, the agent 10/12. **Not better.** The grounded prompt does most of the declining, and CRAG's corrective search can surface look-alike evidence. A `ctx` rerun hit the Claude subscription session limit and is excluded.
+- **What a deeper evaluation showed** ([docs/05](docs/05-evaluation.md#what-a-deeper-evaluation-showed-follow-up-work)): a follow-up on 126 questions from 16 unseen matters found this eval can't separate the systems. The pass rate saturates at ~95%, the binary faithfulness judge disagreed with itself on 44% of identical inputs, and 5 of 126 rubrics contradict the documents. With audited rubrics, claim-level and pairwise judges and matter-level statistics, the pass rate still tied, but where the agent took its own path a pairwise judge preferred its answer 36 times vs. 8 (p < 0.001).
 - **Bottom line:** the retrieval stack (hybrid, rerank, scoping) is the accuracy foundation. The agent is *at least on par*, at lower context but higher LLM cost. Its main value is control and auditability: every failure traced to one node, and the main fix was predicted from traces and confirmed on Colab.
 
 <!-- RESULTS:START -->
@@ -154,6 +155,8 @@ pip install -e ".[obs,dev]"
 python -m hrag.ingest.build                      # A1-A3: download subset, parse, chunk  -> artifacts/
 python -m hrag.index.build --variants raw header ctx   # A5 (needs artifacts/contexts.jsonl for ctx)
 python -m hrag.eval.run_eval retrieval           # retrieval ablations (no LLM)
+python -m hrag.eval.run_eval generation --n 30 --systems naive single_shot agent --resume  # resumes after a session limit
+python -m hrag.eval.stats artifacts/eval/gen_naive_single_shot_agent.jsonl   # paired CIs over matters (no LLM)
 python -c "from hrag.agent.graph import answer_sync as a; print(a('What is the post-merger HHI for flame retardants in the South Central region?', task_id='analyze-iss-antitrust-transaction-structure')['answer'])"
 pytest -q
 ```
