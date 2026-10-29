@@ -1,0 +1,1001 @@
+{
+ "all": {
+  "n_questions": 126,
+  "metrics": {
+   "pass (rubric)": {
+    "n": 126,
+    "n_clusters": 16,
+    "a": 0.952,
+    "b": 0.944,
+    "diff": 0.008,
+    "ci95": [
+     -0.016,
+     0.039
+    ],
+    "only_a": 2,
+    "only_b": 1,
+    "p": 1.0
+   },
+   "faithful (no material error)": {
+    "n": 126,
+    "n_clusters": 16,
+    "a": 0.976,
+    "b": 0.992,
+    "diff": -0.016,
+    "ci95": [
+     -0.039,
+     0.0
+    ],
+    "only_a": 0,
+    "only_b": 2,
+    "p": 0.5
+   },
+   "claim support": {
+    "n": 126,
+    "n_clusters": 16,
+    "a": 0.989,
+    "b": 0.992,
+    "diff": -0.004,
+    "ci95": [
+     -0.007,
+     -0.001
+    ]
+   },
+   "material errors / answer": {
+    "n": 126,
+    "n_clusters": 16,
+    "a": 0.024,
+    "b": 0.008,
+    "diff": 0.016,
+    "ci95": [
+     0.0,
+     0.039
+    ]
+   },
+   "key-fact recall": {
+    "n": 119,
+    "n_clusters": 16,
+    "a": 0.856,
+    "b": 0.868,
+    "diff": -0.012,
+    "ci95": [
+     -0.03,
+     0.006
+    ]
+   },
+   "any gold chunk in evidence": {
+    "n": 98,
+    "n_clusters": 16,
+    "a": 0.939,
+    "b": 0.918,
+    "diff": 0.02,
+    "ci95": [
+     0.0,
+     0.05
+    ],
+    "only_a": 2,
+    "only_b": 0,
+    "p": 0.5
+   },
+   "LLM calls": {
+    "n": 126,
+    "n_clusters": 16,
+    "a": 3.357,
+    "b": 1.0,
+    "diff": 2.357,
+    "ci95": [
+     2.008,
+     2.727
+    ]
+   },
+   "seconds": {
+    "n": 126,
+    "n_clusters": 16,
+    "a": 31.994,
+    "b": 14.575,
+    "diff": 17.418,
+    "ci95": [
+     14.88,
+     19.997
+    ]
+   },
+   "pairwise preference": {
+    "n": 48,
+    "n_clusters": 16,
+    "wins": 36,
+    "ties": 4,
+    "losses": 8,
+    "p": 0.0,
+    "first_shown_won": 0.477
+   }
+  }
+ },
+ "agent took its own path": {
+  "n_questions": 48,
+  "metrics": {
+   "pass (rubric)": {
+    "n": 48,
+    "n_clusters": 16,
+    "a": 0.958,
+    "b": 0.938,
+    "diff": 0.021,
+    "ci95": [
+     -0.045,
+     0.098
+    ],
+    "only_a": 2,
+    "only_b": 1,
+    "p": 1.0
+   },
+   "faithful (no material error)": {
+    "n": 48,
+    "n_clusters": 16,
+    "a": 0.958,
+    "b": 1.0,
+    "diff": -0.042,
+    "ci95": [
+     -0.098,
+     0.0
+    ],
+    "only_a": 0,
+    "only_b": 2,
+    "p": 0.5
+   },
+   "claim support": {
+    "n": 48,
+    "n_clusters": 16,
+    "a": 0.985,
+    "b": 0.995,
+    "diff": -0.01,
+    "ci95": [
+     -0.016,
+     -0.004
+    ]
+   },
+   "material errors / answer": {
+    "n": 48,
+    "n_clusters": 16,
+    "a": 0.042,
+    "b": 0.0,
+    "diff": 0.042,
+    "ci95": [
+     0.0,
+     0.098
+    ]
+   },
+   "key-fact recall": {
+    "n": 41,
+    "n_clusters": 15,
+    "a": 0.844,
+    "b": 0.878,
+    "diff": -0.035,
+    "ci95": [
+     -0.085,
+     0.021
+    ]
+   },
+   "any gold chunk in evidence": {
+    "n": 33,
+    "n_clusters": 15,
+    "a": 0.939,
+    "b": 0.879,
+    "diff": 0.061,
+    "ci95": [
+     0.0,
+     0.161
+    ],
+    "only_a": 2,
+    "only_b": 0,
+    "p": 0.5
+   },
+   "LLM calls": {
+    "n": 48,
+    "n_clusters": 16,
+    "a": 5.438,
+    "b": 1.0,
+    "diff": 4.438,
+    "ci95": [
+     3.94,
+     5.146
+    ]
+   },
+   "seconds": {
+    "n": 48,
+    "n_clusters": 16,
+    "a": 51.052,
+    "b": 16.113,
+    "diff": 34.94,
+    "ci95": [
+     30.953,
+     40.04
+    ]
+   },
+   "pairwise preference": {
+    "n": 48,
+    "n_clusters": 16,
+    "wins": 36,
+    "ties": 4,
+    "losses": 8,
+    "p": 0.0,
+    "first_shown_won": 0.477
+   }
+  }
+ },
+ "kind: analysis": {
+  "n_questions": 66,
+  "metrics": {
+   "pass (rubric)": {
+    "n": 66,
+    "n_clusters": 16,
+    "a": 0.939,
+    "b": 0.924,
+    "diff": 0.015,
+    "ci95": [
+     0.0,
+     0.048
+    ],
+    "only_a": 1,
+    "only_b": 0,
+    "p": 1.0
+   },
+   "faithful (no material error)": {
+    "n": 66,
+    "n_clusters": 16,
+    "a": 0.955,
+    "b": 0.985,
+    "diff": -0.03,
+    "ci95": [
+     -0.072,
+     0.0
+    ],
+    "only_a": 0,
+    "only_b": 2,
+    "p": 0.5
+   },
+   "claim support": {
+    "n": 66,
+    "n_clusters": 16,
+    "a": 0.985,
+    "b": 0.992,
+    "diff": -0.007,
+    "ci95": [
+     -0.012,
+     -0.002
+    ]
+   },
+   "material errors / answer": {
+    "n": 66,
+    "n_clusters": 16,
+    "a": 0.045,
+    "b": 0.015,
+    "diff": 0.03,
+    "ci95": [
+     0.0,
+     0.072
+    ]
+   },
+   "key-fact recall": {
+    "n": 59,
+    "n_clusters": 16,
+    "a": 0.903,
+    "b": 0.925,
+    "diff": -0.023,
+    "ci95": [
+     -0.056,
+     0.005
+    ]
+   },
+   "any gold chunk in evidence": {
+    "n": 53,
+    "n_clusters": 16,
+    "a": 0.962,
+    "b": 0.943,
+    "diff": 0.019,
+    "ci95": [
+     0.0,
+     0.064
+    ],
+    "only_a": 1,
+    "only_b": 0,
+    "p": 1.0
+   },
+   "LLM calls": {
+    "n": 66,
+    "n_clusters": 16,
+    "a": 3.758,
+    "b": 1.0,
+    "diff": 2.758,
+    "ci95": [
+     2.271,
+     3.302
+    ]
+   },
+   "seconds": {
+    "n": 66,
+    "n_clusters": 16,
+    "a": 37.197,
+    "b": 16.276,
+    "diff": 20.921,
+    "ci95": [
+     17.143,
+     24.919
+    ]
+   },
+   "pairwise preference": {
+    "n": 33,
+    "n_clusters": 16,
+    "wins": 26,
+    "ties": 2,
+    "losses": 5,
+    "p": 0.0,
+    "first_shown_won": 0.516
+   }
+  }
+ },
+ "kind: fact": {
+  "n_questions": 60,
+  "metrics": {
+   "pass (rubric)": {
+    "n": 60,
+    "n_clusters": 16,
+    "a": 0.967,
+    "b": 0.967,
+    "diff": 0.0,
+    "ci95": [
+     -0.045,
+     0.051
+    ],
+    "only_a": 1,
+    "only_b": 1,
+    "p": 1.0
+   },
+   "faithful (no material error)": {
+    "n": 60,
+    "n_clusters": 16,
+    "a": 1.0,
+    "b": 1.0,
+    "diff": 0.0,
+    "ci95": [
+     0.0,
+     0.0
+    ],
+    "only_a": 0,
+    "only_b": 0,
+    "p": 1.0
+   },
+   "claim support": {
+    "n": 60,
+    "n_clusters": 16,
+    "a": 0.992,
+    "b": 0.993,
+    "diff": -0.001,
+    "ci95": [
+     -0.004,
+     0.002
+    ]
+   },
+   "material errors / answer": {
+    "n": 60,
+    "n_clusters": 16,
+    "a": 0.0,
+    "b": 0.0,
+    "diff": 0.0,
+    "ci95": [
+     0.0,
+     0.0
+    ]
+   },
+   "key-fact recall": {
+    "n": 60,
+    "n_clusters": 16,
+    "a": 0.811,
+    "b": 0.812,
+    "diff": -0.001,
+    "ci95": [
+     -0.027,
+     0.025
+    ]
+   },
+   "any gold chunk in evidence": {
+    "n": 45,
+    "n_clusters": 16,
+    "a": 0.911,
+    "b": 0.889,
+    "diff": 0.022,
+    "ci95": [
+     0.0,
+     0.079
+    ],
+    "only_a": 1,
+    "only_b": 0,
+    "p": 1.0
+   },
+   "LLM calls": {
+    "n": 60,
+    "n_clusters": 16,
+    "a": 2.917,
+    "b": 1.0,
+    "diff": 1.917,
+    "ci95": [
+     1.5,
+     2.397
+    ]
+   },
+   "seconds": {
+    "n": 60,
+    "n_clusters": 16,
+    "a": 26.27,
+    "b": 12.705,
+    "diff": 13.565,
+    "ci95": [
+     10.152,
+     17.395
+    ]
+   },
+   "pairwise preference": {
+    "n": 15,
+    "n_clusters": 10,
+    "wins": 10,
+    "ties": 2,
+    "losses": 3,
+    "p": 0.039,
+    "first_shown_won": 0.385
+   }
+  }
+ },
+ "rubric not contradicted by the documents (audit)": {
+  "n_questions": 121,
+  "metrics": {
+   "pass (rubric)": {
+    "n": 121,
+    "n_clusters": 16,
+    "a": 0.975,
+    "b": 0.959,
+    "diff": 0.017,
+    "ci95": [
+     0.0,
+     0.041
+    ],
+    "only_a": 2,
+    "only_b": 0,
+    "p": 0.5
+   },
+   "faithful (no material error)": {
+    "n": 121,
+    "n_clusters": 16,
+    "a": 0.975,
+    "b": 0.992,
+    "diff": -0.017,
+    "ci95": [
+     -0.04,
+     0.0
+    ],
+    "only_a": 0,
+    "only_b": 2,
+    "p": 0.5
+   },
+   "claim support": {
+    "n": 121,
+    "n_clusters": 16,
+    "a": 0.988,
+    "b": 0.992,
+    "diff": -0.004,
+    "ci95": [
+     -0.007,
+     -0.001
+    ]
+   },
+   "material errors / answer": {
+    "n": 121,
+    "n_clusters": 16,
+    "a": 0.025,
+    "b": 0.008,
+    "diff": 0.017,
+    "ci95": [
+     0.0,
+     0.04
+    ]
+   },
+   "key-fact recall": {
+    "n": 115,
+    "n_clusters": 16,
+    "a": 0.851,
+    "b": 0.864,
+    "diff": -0.012,
+    "ci95": [
+     -0.031,
+     0.007
+    ]
+   },
+   "any gold chunk in evidence": {
+    "n": 94,
+    "n_clusters": 16,
+    "a": 0.936,
+    "b": 0.915,
+    "diff": 0.021,
+    "ci95": [
+     0.0,
+     0.053
+    ],
+    "only_a": 2,
+    "only_b": 0,
+    "p": 0.5
+   },
+   "LLM calls": {
+    "n": 121,
+    "n_clusters": 16,
+    "a": 3.331,
+    "b": 1.0,
+    "diff": 2.331,
+    "ci95": [
+     1.973,
+     2.737
+    ]
+   },
+   "seconds": {
+    "n": 121,
+    "n_clusters": 16,
+    "a": 31.628,
+    "b": 14.615,
+    "diff": 17.013,
+    "ci95": [
+     14.455,
+     19.726
+    ]
+   },
+   "pairwise preference": {
+    "n": 46,
+    "n_clusters": 16,
+    "wins": 34,
+    "ties": 4,
+    "losses": 8,
+    "p": 0.0,
+    "first_shown_won": 0.5
+   }
+  }
+ },
+ "audit: supported": {
+  "n_questions": 111,
+  "metrics": {
+   "pass (rubric)": {
+    "n": 111,
+    "n_clusters": 16,
+    "a": 0.991,
+    "b": 0.973,
+    "diff": 0.018,
+    "ci95": [
+     0.0,
+     0.044
+    ],
+    "only_a": 2,
+    "only_b": 0,
+    "p": 0.5
+   },
+   "faithful (no material error)": {
+    "n": 111,
+    "n_clusters": 16,
+    "a": 0.982,
+    "b": 0.991,
+    "diff": -0.009,
+    "ci95": [
+     -0.028,
+     0.0
+    ],
+    "only_a": 0,
+    "only_b": 1,
+    "p": 1.0
+   },
+   "claim support": {
+    "n": 111,
+    "n_clusters": 16,
+    "a": 0.988,
+    "b": 0.992,
+    "diff": -0.004,
+    "ci95": [
+     -0.007,
+     -0.001
+    ]
+   },
+   "material errors / answer": {
+    "n": 111,
+    "n_clusters": 16,
+    "a": 0.018,
+    "b": 0.009,
+    "diff": 0.009,
+    "ci95": [
+     0.0,
+     0.028
+    ]
+   },
+   "key-fact recall": {
+    "n": 105,
+    "n_clusters": 16,
+    "a": 0.846,
+    "b": 0.856,
+    "diff": -0.01,
+    "ci95": [
+     -0.031,
+     0.011
+    ]
+   },
+   "any gold chunk in evidence": {
+    "n": 86,
+    "n_clusters": 16,
+    "a": 0.93,
+    "b": 0.919,
+    "diff": 0.012,
+    "ci95": [
+     0.0,
+     0.037
+    ],
+    "only_a": 1,
+    "only_b": 0,
+    "p": 1.0
+   },
+   "LLM calls": {
+    "n": 111,
+    "n_clusters": 16,
+    "a": 3.306,
+    "b": 1.0,
+    "diff": 2.306,
+    "ci95": [
+     1.936,
+     2.734
+    ]
+   },
+   "seconds": {
+    "n": 111,
+    "n_clusters": 16,
+    "a": 31.054,
+    "b": 14.177,
+    "diff": 16.877,
+    "ci95": [
+     14.069,
+     19.846
+    ]
+   },
+   "pairwise preference": {
+    "n": 42,
+    "n_clusters": 15,
+    "wins": 32,
+    "ties": 3,
+    "losses": 7,
+    "p": 0.0,
+    "first_shown_won": 0.513
+   }
+  }
+ },
+ "audit: outside_knowledge": {
+  "n_questions": 7,
+  "metrics": {
+   "pass (rubric)": {
+    "n": 7,
+    "n_clusters": 2,
+    "a": 1.0,
+    "b": 1.0,
+    "diff": 0.0,
+    "ci95": [
+     0.0,
+     0.0
+    ],
+    "only_a": 0,
+    "only_b": 0,
+    "p": 1.0
+   },
+   "faithful (no material error)": {
+    "n": 7,
+    "n_clusters": 2,
+    "a": 0.857,
+    "b": 1.0,
+    "diff": -0.143,
+    "ci95": [
+     -0.5,
+     0.0
+    ],
+    "only_a": 0,
+    "only_b": 1,
+    "p": 1.0
+   },
+   "claim support": {
+    "n": 7,
+    "n_clusters": 2,
+    "a": 0.987,
+    "b": 0.99,
+    "diff": -0.003,
+    "ci95": [
+     -0.01,
+     0.0
+    ]
+   },
+   "material errors / answer": {
+    "n": 7,
+    "n_clusters": 2,
+    "a": 0.143,
+    "b": 0.0,
+    "diff": 0.143,
+    "ci95": [
+     0.0,
+     0.5
+    ]
+   },
+   "key-fact recall": {
+    "n": 7,
+    "n_clusters": 2,
+    "a": 0.917,
+    "b": 0.917,
+    "diff": 0.0,
+    "ci95": [
+     0.0,
+     0.0
+    ]
+   },
+   "any gold chunk in evidence": {
+    "n": 5,
+    "n_clusters": 2,
+    "a": 1.0,
+    "b": 0.8,
+    "diff": 0.2,
+    "ci95": [
+     0.0,
+     0.333
+    ],
+    "only_a": 1,
+    "only_b": 0,
+    "p": 1.0
+   },
+   "LLM calls": {
+    "n": 7,
+    "n_clusters": 2,
+    "a": 3.857,
+    "b": 1.0,
+    "diff": 2.857,
+    "ci95": [
+     2.2,
+     4.5
+    ]
+   },
+   "seconds": {
+    "n": 7,
+    "n_clusters": 2,
+    "a": 41.314,
+    "b": 21.071,
+    "diff": 20.243,
+    "ci95": [
+     18.5,
+     24.6
+    ]
+   },
+   "pairwise preference": {
+    "n": 3,
+    "n_clusters": 2,
+    "wins": 2,
+    "ties": 0,
+    "losses": 1,
+    "p": 1.0,
+    "first_shown_won": 0.333
+   }
+  }
+ },
+ "audit: not_determinable": {
+  "n_questions": 3,
+  "metrics": {
+   "pass (rubric)": {
+    "n": 3,
+    "n_clusters": 3,
+    "a": 0.333,
+    "b": 0.333,
+    "diff": 0.0,
+    "ci95": [
+     0.0,
+     0.0
+    ],
+    "only_a": 0,
+    "only_b": 0,
+    "p": 1.0
+   },
+   "faithful (no material error)": {
+    "n": 3,
+    "n_clusters": 3,
+    "a": 1.0,
+    "b": 1.0,
+    "diff": 0.0,
+    "ci95": [
+     0.0,
+     0.0
+    ],
+    "only_a": 0,
+    "only_b": 0,
+    "p": 1.0
+   },
+   "claim support": {
+    "n": 3,
+    "n_clusters": 3,
+    "a": 1.0,
+    "b": 1.0,
+    "diff": 0.0,
+    "ci95": [
+     0.0,
+     0.0
+    ]
+   },
+   "material errors / answer": {
+    "n": 3,
+    "n_clusters": 3,
+    "a": 0.0,
+    "b": 0.0,
+    "diff": 0.0,
+    "ci95": [
+     0.0,
+     0.0
+    ]
+   },
+   "key-fact recall": {
+    "n": 3,
+    "n_clusters": 3,
+    "a": 0.889,
+    "b": 1.0,
+    "diff": -0.111,
+    "ci95": [
+     -0.333,
+     0.0
+    ]
+   },
+   "any gold chunk in evidence": {
+    "n": 3,
+    "n_clusters": 3,
+    "a": 1.0,
+    "b": 1.0,
+    "diff": 0.0,
+    "ci95": [
+     0.0,
+     0.0
+    ],
+    "only_a": 0,
+    "only_b": 0,
+    "p": 1.0
+   },
+   "LLM calls": {
+    "n": 3,
+    "n_clusters": 3,
+    "a": 3.0,
+    "b": 1.0,
+    "diff": 2.0,
+    "ci95": [
+     1.0,
+     4.0
+    ]
+   },
+   "seconds": {
+    "n": 3,
+    "n_clusters": 3,
+    "a": 30.267,
+    "b": 15.767,
+    "diff": 14.5,
+    "ci95": [
+     5.9,
+     30.1
+    ]
+   },
+   "pairwise preference": {
+    "n": 1,
+    "n_clusters": 1,
+    "wins": 0,
+    "ties": 1,
+    "losses": 0,
+    "p": 1.0,
+    "first_shown_won": null
+   }
+  }
+ },
+ "audit: contradicted": {
+  "n_questions": 5,
+  "metrics": {
+   "pass (rubric)": {
+    "n": 5,
+    "n_clusters": 3,
+    "a": 0.4,
+    "b": 0.6,
+    "diff": -0.2,
+    "ci95": [
+     -0.5,
+     0.0
+    ],
+    "only_a": 0,
+    "only_b": 1,
+    "p": 1.0
+   },
+   "faithful (no material error)": {
+    "n": 5,
+    "n_clusters": 3,
+    "a": 1.0,
+    "b": 1.0,
+    "diff": 0.0,
+    "ci95": [
+     0.0,
+     0.0
+    ],
+    "only_a": 0,
+    "only_b": 0,
+    "p": 1.0
+   },
+   "claim support": {
+    "n": 5,
+    "n_clusters": 3,
+    "a": 1.0,
+    "b": 1.0,
+    "diff": 0.0,
+    "ci95": [
+     0.0,
+     0.0
+    ]
+   },
+   "material errors / answer": {
+    "n": 5,
+    "n_clusters": 3,
+    "a": 0.0,
+    "b": 0.0,
+    "diff": 0.0,
+    "ci95": [
+     0.0,
+     0.0
+    ]
+   },
+   "key-fact recall": {
+    "n": 4,
+    "n_clusters": 3,
+    "a": 1.0,
+    "b": 1.0,
+    "diff": 0.0,
+    "ci95": [
+     0.0,
+     0.0
+    ]
+   },
+   "any gold chunk in evidence": {
+    "n": 4,
+    "n_clusters": 3,
+    "a": 1.0,
+    "b": 1.0,
+    "diff": 0.0,
+    "ci95": [
+     0.0,
+     0.0
+    ],
+    "only_a": 0,
+    "only_b": 0,
+    "p": 1.0
+   },
+   "LLM calls": {
+    "n": 5,
+    "n_clusters": 3,
+    "a": 4.0,
+    "b": 1.0,
+    "diff": 3.0,
+    "ci95": [
+     1.0,
+     6.0
+    ]
+   },
+   "seconds": {
+    "n": 5,
+    "n_clusters": 3,
+    "a": 40.84,
+    "b": 13.62,
+    "diff": 27.22,
+    "ci95": [
+     6.05,
+     58.9
+    ]
+   },
+   "pairwise preference": {
+    "n": 2,
+    "n_clusters": 1,
+    "wins": 2,
+    "ties": 0,
+    "losses": 0,
+    "p": 1.0,
+    "first_shown_won": 0.0
+   }
+  }
+ }
+}

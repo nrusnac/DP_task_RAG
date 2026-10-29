@@ -1,0 +1,6 @@
+{"qid": "identify-issues-in-cfius-mandatory-declaration::C-022", "system": "single_shot", "field": "verdict", "votes": ["fail", "fail", "fail"], "majority": "fail"}
+{"qid": "identify-issues-in-cfius-mandatory-declaration::C-022", "system": "agent", "field": "verdict", "votes": ["pass", "pass", "pass"], "majority": "pass"}
+{"qid": "identify-issues-in-proposed-remedies-package::C-028", "system": "agent", "field": "verdict", "votes": ["fail", "pass", "fail"], "majority": "fail"}
+{"qid": "identify-compliance-and-substantive-deficiencies-in-draft-cfius-voluntary-notice::C-041", "system": "agent", "field": "verdict", "votes": ["pass", "pass", "pass"], "majority": "pass"}
+{"qid": "identify-issues-in-proposed-remedies-package::C-028", "system": "single_shot", "field": "verdict", "votes": ["pass", "pass", "pass"], "majority": "pass"}
+{"qid": "identify-compliance-and-substantive-deficiencies-in-draft-cfius-voluntary-notice::C-041", "system": "single_shot", "field": "verdict", "votes": ["fail", "fail", "fail"], "majority": "fail"}
