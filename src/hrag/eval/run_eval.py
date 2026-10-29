@@ -5,6 +5,7 @@
     python -m hrag.eval.run_eval generation --n 40 --systems naive single_shot agent
     python -m hrag.eval.run_eval generation --n 40 --systems naive single_shot agent --resume  # after a session limit
     python -m hrag.eval.run_eval generation --n 20 --systems agent:simple agent:complex agent   # Adaptive-RAG ablation
+    python -m hrag.eval.run_eval generation --n 30 --systems basic agent --tag basic_vs_agent  # textbook RAG (agent/basic_rag.py)
     python -m hrag.eval.run_eval negatives --n 12 --systems single_shot agent                   # unanswerable questions
 """
 from __future__ import annotations
@@ -126,6 +127,9 @@ async def _run_system(system: str, it: dict, variant: str) -> dict:
     from ..agent.graph import answer
     if system == "naive":
         return await baseline.naive(it["question"], it["task_id"])
+    if system == "basic":
+        from ..agent.basic_rag import basic
+        return await basic(it["question"], it["task_id"])
     if system == "single_shot":
         return await baseline.single_shot(it["question"], it["task_id"], variant=variant)
     policy = system.split(":", 1)[1] if ":" in system else "adaptive"
@@ -168,9 +172,11 @@ async def generation(n: int = 40, systems=("single_shot", "agent"), seed: int = 
                                verdict=corr["verdict"], judge_reasoning=corr["reasoning"],
                                faithful=faith.get("faithful"), unsupported=faith.get("unsupported"),
                                abstained=any(m in (res["answer"] or "")[:250].lower() for m in ABSTAIN_MARKERS),
+                               # basic has its own fixed-size chunks, so the silver labels (structure-aware chunk ids)
+                               # don't apply to it
                                evidence_hits_gold=bool(set(it["gold"]) & {e["chunk_id"] for e in res["evidence"]})
-                               if it["gold"] else None,
-                               cited_gold=bool(set(it["gold"]) & cited) if it["gold"] else None,
+                               if it["gold"] and system != "basic" else None,
+                               cited_gold=bool(set(it["gold"]) & cited) if it["gold"] and system != "basic" else None,
                                n_evidence=len(res["evidence"]),
                                evidence_words=sum(len(e["text"].split()) for e in res["evidence"]),
                                llm_calls=res.get("llm_calls"), seconds=res.get("seconds"),

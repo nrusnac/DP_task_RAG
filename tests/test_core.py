@@ -150,3 +150,12 @@ def test_quota_error_stops_generation_and_resume_runs_the_rest(tmp_path, monkeyp
                                         resume=True))
     assert sorted(calls) == sorted({i["qid"] for i in items} - {r["qid"] for r in first})
     assert s["single_shot"]["n"] == 4
+
+
+def test_basic_rag_fixed_chunks_and_plain_text():
+    from hrag.agent.basic_rag import fixed_chunks, plain_text
+    text = "".join(str(i % 10) for i in range(2500))
+    ch = fixed_chunks(text, 1000, 200)
+    assert [len(c) for c in ch] == [1000, 1000, 900] and ch[1][:200] == ch[0][800:]
+    assert plain_text([{"kind": "heading", "level": 1, "text": "Title"},
+                       {"kind": "table", "rows": [["A", "B"], ["1", "2"]], "title": None}]) == "Title\nA  B\n1  2"
